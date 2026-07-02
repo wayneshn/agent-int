@@ -1,13 +1,5 @@
 # Valmis - The OpenClaw alternative designed for work, with security in mind
 
-### We are live on Product Hunt today!
-
-Valmis is launching on Product Hunt today. If you like the project, we'd love your support.
-
-<a href="https://www.producthunt.com/products/valmis?embed=true&utm_source=badge-featured&utm_medium=badge&utm_campaign=badge-valmis" target="_blank" rel="noopener noreferrer"><img alt="Valmis - Open-source alternative to Claude Cowork / OpenClaw for work | Product Hunt" width="250" height="54" src="https://api.producthunt.com/widgets/embed-image/v1/featured.svg?post_id=1185519&theme=light&t=1782946465084"></a>
-
---- 
-
 Valmis is a cloud-based application for shipping AI agents for production work. It allows you to build a fleet of agents that can talk to 100+ business and productivity integrations. The system is designed with security in mind, and agents run in isolated containers, meaning AI never gets access to your API credentials or your host files.
 
 Valmis is designed to automate workflows using AI. You can interact with your agent using the chat interface, or ask it to create multi-step workflows and trigger it with cron, webhook, or app events (new email, form submission, etc.).
@@ -24,7 +16,7 @@ Each agent has its own file system and is completely isolated from the host mach
 
 Agents can only work for you when they have access (safely) to your apps. Our proxy system now supports 100+ business and productivity integrations, including all Google Workspace apps, Slack, Notion, Hubspot, Salesforce, and Figma. See [integrations](packages/utils/src/integrations/definitions) folder for all currently supported apps. Each agent you create can be assigned access to specific (or all) credentials, and this boundary is strictly followed at the code level. You can then talk to the agent to complete certain tasks, and agents will formulate proxy requests to the host machine to actually send the requests.
 
-https://github.com/user-attachments/assets/82d1b6f7-2b07-482b-9f3a-67900ca9c72b
+https://github.com/user-attachments/assets/d20ad083-2485-4e73-9410-20e218b1c7b7
 
 [Watch intro on Youtube](https://www.youtube.com/watch?v=-R6ea1UYge0)
 

@@ -12,6 +12,8 @@
 	"dependencies": {
 		"@earendil-works/pi-agent-core": "^0.78.0",
 		"@earendil-works/pi-ai": "^0.78.0",
+		"@openuidev/lang-core": "^0.2.7",
+		"@repo/openui": "workspace:*",
 		"@repo/types": "workspace:*",
 		"@repo/utils": "workspace:*",
 		"ajv": "^8.17.1",

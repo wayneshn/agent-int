@@ -21,6 +21,7 @@ import BookOpenIcon from '@lucide/svelte/icons/book-open';
 import ClockIcon from '@lucide/svelte/icons/clock';
 import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
 import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
+import LayoutIcon from '@lucide/svelte/icons/layout-template';
 
 /**
  * Maps built-in agent tool names to their Lucide icon constructors.
@@ -52,7 +53,8 @@ export const TOOL_ICON_MAP: Record<string, typeof WrenchIcon> = {
 	browser_read_page: BookOpenIcon,
 	browser_wait_for: ClockIcon,
 	browser_go_back: ArrowLeftIcon,
-	browser_go_forward: ArrowRightIcon
+	browser_go_forward: ArrowRightIcon,
+	render_ui: LayoutIcon
 };
 
 /** Fallback icon when a tool name is not found in TOOL_ICON_MAP */

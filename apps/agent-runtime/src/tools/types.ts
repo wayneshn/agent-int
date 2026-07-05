@@ -42,6 +42,13 @@ export interface ToolContext {
 	 * action (live DB check), so this flag is only a UX/registration convenience.
 	 */
 	browserAvailable?: boolean;
+	/**
+	 * Whether the render_ui tool (OpenUI generative UI) should be registered for
+	 * this turn. Set from AgentRuntimeConfig.uiRenderingAvailable — true only for
+	 * chat turns originating from the web channel. External channels and
+	 * cron/webhook/workflow runs stay text-only.
+	 */
+	uiRenderingAvailable?: boolean;
 }
 
 /**

@@ -16,6 +16,7 @@ import { createTriggerWorkflowTool } from './trigger-workflow.js';
 import { createCreateWorkflowTool } from './create-workflow.js';
 import { createChessEngineTool } from './chess-engine.js';
 import { createBrowserTools } from './browser.js';
+import { createRenderUiTool } from './render-ui.js';
 
 export type { ToolContext } from './types.js';
 export { resolveWorkspacePath } from './types.js';
@@ -41,6 +42,10 @@ export { resolveWorkspacePath } from './types.js';
  * ctx.browserAvailable is true — i.e. the agent has internet access and the
  * project-wide browser feature is enabled. This is the registration layer of the
  * gate; the backend independently re-checks on every browser action.
+ *
+ * The render_ui tool (OpenUI generative UI) is included ONLY when
+ * ctx.uiRenderingAvailable is true — chat turns from the web channel. External
+ * channels (telegram/discord) and workflow runs stay text-only by omission.
  */
 export function createAgentTools(ctx: Parameters<typeof createCallApiTool>[0]): AgentTool[] {
 	const tools = [
@@ -63,6 +68,9 @@ export function createAgentTools(ctx: Parameters<typeof createCallApiTool>[0]): 
 	];
 	if (ctx.browserAvailable) {
 		tools.push(...createBrowserTools(ctx));
+	}
+	if (ctx.uiRenderingAvailable) {
+		tools.push(createRenderUiTool(ctx));
 	}
 	return tools;
 }

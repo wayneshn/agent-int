@@ -4,6 +4,7 @@ import type {
 	AgentTriggerType,
 	AgentRuntimeConfig,
 	Agent,
+	ChannelType,
 	CredentialMeta,
 	LlmProviderConfig,
 	SkillRuntimeEntry,
@@ -312,6 +313,7 @@ export class AgentRuntimeService {
 		triggerPayload?: Record<string, unknown>,
 		userDatetime?: string,
 		workflowConfig?: WorkflowSpawnConfig,
+		channel?: ChannelType,
 	): Promise<boolean> {
 		// Concurrency cap — reject before touching thread state or spawning.
 		if (this.liveRuns.size >= this.maxConcurrent) {
@@ -384,6 +386,7 @@ export class AgentRuntimeService {
 			triggerPayload,
 			userDatetime,
 			workflowConfig,
+			channel,
 		);
 
 		// Resolve the effective credential allowlist. When the agent is flagged with
@@ -629,6 +632,7 @@ export class AgentRuntimeService {
 		triggerPayload?: Record<string, unknown>,
 		userDatetime?: string,
 		workflowConfig?: WorkflowSpawnConfig,
+		channel?: ChannelType,
 	): Promise<AgentRuntimeConfig> {
 		const modelProvider = modelConfig.provider;
 		const modelId = modelConfig.model;
@@ -766,6 +770,10 @@ export class AgentRuntimeService {
 			// conditional tool registration). The authoritative gate is a live DB check
 			// on every browser action in BrowserService (layer 2).
 			browserAvailable: agent.allowInternetAccess && this.browserService.isEnabled(),
+			// The render_ui (OpenUI generative UI) tool is offered only for chat turns
+			// coming from the web channel — external channels (telegram/discord) and
+			// cron/webhook/workflow runs cannot display interactive UI and stay text-only.
+			uiRenderingAvailable: triggerType === 'chat' && channel === 'web',
 			// Workflow config — present only for workflow runs. Causes the runtime to route
 			// to workflow-runner.ts rather than agent-runner.ts.
 			...(workflowConfig !== undefined

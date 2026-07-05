@@ -6,8 +6,10 @@
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ImageBlock from './ImageBlock.svelte';
 	import ChatAttachment from './ChatAttachment.svelte';
+	import OpenUiBlock from './OpenUiBlock.svelte';
 	import { TOOL_ICON_MAP, DEFAULT_TOOL_ICON } from './tool-icon-map.js';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
+	import ClipboardListIcon from '@lucide/svelte/icons/clipboard-list';
 	import type { AgentMessage, ChatFile, ContentBlock } from '@repo/types';
 
 	/** Shape of one entry in credentialMetaMap */
@@ -50,7 +52,18 @@
 		agentId,
 		threadId,
 		/** Open a file in the preview sidebar. */
-		onOpenFile
+		onOpenFile,
+		/**
+		 * Send a chat message on behalf of the user — fired by interactive UI
+		 * (render_ui button clicks / form submits). Absent on read-only contexts.
+		 */
+		onUiAction,
+		/**
+		 * Map of PLACEHOLDER toolCallId → render_ui code-so-far. Fed by
+		 * render_ui_partial SSE snapshots so the UI renders progressively while
+		 * the LLM is still writing it; empty once the tool call completes.
+		 */
+		streamingUiCode = {}
 	}: {
 		message: AgentMessage;
 		agentName: string;
@@ -65,6 +78,8 @@
 		agentId: string;
 		threadId: string;
 		onOpenFile: (file: ChatFile) => void;
+		onUiAction?: (text: string) => void;
+		streamingUiCode?: Record<string, string>;
 	} = $props();
 
 	let isUser = $derived(message.role === 'user');
@@ -93,6 +108,9 @@
 
 	/** Combined text across all text blocks for display. */
 	let combinedText = $derived(textBlocks.map((b) => b.text).join('\n\n'));
+
+	/** Messages carrying generated UI get the full column width (charts, tables). */
+	let hasUiBlock = $derived(toolCallBlocks.some((b) => b.name === 'render_ui'));
 
 	/** Show a loading pulse if streaming and no text yet */
 	let showTypingIndicator = $derived(isStreaming && isAssistant && combinedText.length === 0);
@@ -155,6 +173,52 @@
 		}
 		return { type: 'icon', component: TOOL_ICON_MAP[toolName] ?? DEFAULT_TOOL_ICON };
 	}
+
+	/**
+	 * Extract the OpenUI Lang source of a render_ui tool call. Historical
+	 * messages carry it in block.arguments (from DB); live streaming carries it
+	 * in the tool_call_delta argsJson. Undefined while args haven't arrived yet.
+	 */
+	function extractUiCode(
+		argsJson: string | undefined,
+		blockArgs: Record<string, unknown>
+	): string | undefined {
+		if (typeof blockArgs.code === 'string' && blockArgs.code.length > 0) {
+			return blockArgs.code;
+		}
+		if (argsJson) {
+			try {
+				const parsed = JSON.parse(argsJson) as Record<string, unknown>;
+				if (typeof parsed.code === 'string' && parsed.code.length > 0) {
+					return parsed.code;
+				}
+			} catch {
+				// malformed argsJson — treat as not yet available
+			}
+		}
+		return undefined;
+	}
+
+	/**
+	 * Detect a UI form-submission message. OpenUiBlock sends interactions as
+	 * "<label>\n\n```json\n<data>\n```" (the JSON is the agent-facing payload);
+	 * for display we show the label in the bubble and the data in an expandable
+	 * ToolCallIndicator instead of raw code fences. Returns null for ordinary
+	 * text or when the trailing block isn't valid JSON (conservative fallback
+	 * to plain rendering). Keep in sync with OpenUiBlock.handleAction.
+	 */
+	function parseUserFormMessage(text: string): { label: string; json: string } | null {
+		const match = text.match(/^([\s\S]*?)\n\n```json\n([\s\S]*?)\n```\s*$/);
+		if (!match) return null;
+		try {
+			JSON.parse(match[2]);
+		} catch {
+			return null;
+		}
+		return { label: match[1].trim(), json: match[2] };
+	}
+
+	let userFormMessage = $derived(isUser ? parseUserFormMessage(combinedText) : null);
 </script>
 
 {#if message.role === 'tool_result'}
@@ -170,11 +234,12 @@
 			{/if}
 		</div>
 
-		<!-- Message content: max-w-[75%] caps width; min-w-0 + overflow-hidden prevents flex blowout on mobile -->
+		<!-- Message content: max-w-[75%] caps width; min-w-0 + overflow-hidden prevents flex blowout
+		 on mobile. Assistant messages with generated UI (render_ui) take the full column width. -->
 		<div
-			class="flex max-w-[75%] min-w-0 flex-col gap-1 overflow-hidden {isUser
-				? 'items-end'
-				: 'items-start'}"
+			class="flex min-w-0 flex-col gap-1 overflow-hidden px-1 {isAssistant && hasUiBlock
+				? 'w-full max-w-full'
+				: 'max-w-[75%]'} {isUser ? 'items-end' : 'items-start'}"
 		>
 			<!-- Sender label -->
 			<span class="text-xs font-medium text-muted-foreground">
@@ -201,17 +266,39 @@
 						(Object.keys(block.arguments).length > 0
 							? JSON.stringify(block.arguments, null, 2)
 							: undefined)}
-					{@const display = resolveToolDisplay(block.name, argsJson)}
-					<ToolCallIndicator
-						toolName={block.name}
-						toolDisplayName={display.toolDisplayName}
-						{argsJson}
-						result={toolResults[block.id]}
-						images={toolResultImages[block.id]}
-						isRunning={isStreaming && !toolResults[block.id]}
-						iconUrl={display.type === 'img' ? display.url : undefined}
-						iconComponent={display.type === 'icon' ? display.component : undefined}
-					/>
+					{@const uiCode =
+						block.name === 'render_ui' ? extractUiCode(argsJson, block.arguments) : undefined}
+					{@const liveCode = block.name === 'render_ui' ? streamingUiCode[block.id] : undefined}
+					{@const uiRejected =
+						toolResults[block.id]?.startsWith('The UI was NOT rendered') ?? false}
+					{#if uiCode && !uiRejected}
+						<!-- render_ui — show the generated UI itself instead of a tool indicator -->
+						<OpenUiBlock
+							code={uiCode}
+							disabled={isStreaming}
+							onSendMessage={(t) => onUiAction?.(t)}
+						/>
+					{:else if liveCode && !uiRejected}
+						<!-- render_ui still streaming — render the code-so-far progressively -->
+						<OpenUiBlock
+							code={liveCode}
+							streaming
+							disabled
+							onSendMessage={(t) => onUiAction?.(t)}
+						/>
+					{:else}
+						{@const display = resolveToolDisplay(block.name, argsJson)}
+						<ToolCallIndicator
+							toolName={block.name}
+							toolDisplayName={display.toolDisplayName}
+							{argsJson}
+							result={toolResults[block.id]}
+							images={toolResultImages[block.id]}
+							isRunning={isStreaming && !toolResults[block.id]}
+							iconUrl={display.type === 'img' ? display.url : undefined}
+							iconComponent={display.type === 'icon' ? display.component : undefined}
+						/>
+					{/if}
 				{/each}
 
 				<!-- Main text content — rendered as markdown -->
@@ -243,12 +330,32 @@
 					</div>
 				{/if}
 			{:else if combinedText}
-				<!-- User message bubble — wrap-break-word prevents long URLs from overflowing -->
-				<div class="rounded-2xl rounded-tr-sm bg-primary px-4 py-2.5 text-sm leading-relaxed">
-					<p class="font-serif wrap-break-word whitespace-pre-wrap text-primary-foreground">
-						{combinedText}
-					</p>
-				</div>
+				{#if userFormMessage}
+					<!-- UI form submission — label in the bubble, data in an expandable strip -->
+					{#if userFormMessage.label}
+						<div class="rounded-2xl rounded-tr-sm bg-primary px-4 py-2.5 text-sm leading-relaxed">
+							<p class="font-serif wrap-break-word whitespace-pre-wrap text-primary-foreground">
+								{userFormMessage.label}
+							</p>
+						</div>
+					{/if}
+					<div class="w-full max-w-72">
+						<ToolCallIndicator
+							toolName=""
+							toolDisplayName="Form data"
+							argsJson={userFormMessage.json}
+							detailsLabel="Submitted values"
+							iconComponent={ClipboardListIcon}
+						/>
+					</div>
+				{:else}
+					<!-- User message bubble — wrap-break-word prevents long URLs from overflowing -->
+					<div class="rounded-2xl rounded-tr-sm bg-primary px-4 py-2.5 text-sm leading-relaxed">
+						<p class="font-serif wrap-break-word whitespace-pre-wrap text-primary-foreground">
+							{combinedText}
+						</p>
+					</div>
+				{/if}
 			{/if}
 
 			<!-- Attachments (user uploads + agent-shared files) -->

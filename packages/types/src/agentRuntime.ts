@@ -438,6 +438,14 @@ export interface AgentRuntimeConfig {
 	 */
 	browserAvailable?: boolean;
 	/**
+	 * Whether the render_ui tool (OpenUI generative UI) is available for this
+	 * turn. The backend sets this to `true` only for chat turns originating from
+	 * the web channel — external channels (telegram/discord) can't display
+	 * interactive UI and cron/webhook/workflow runs have no viewer, so the tool
+	 * is never registered there and those turns stay plain-text.
+	 */
+	uiRenderingAvailable?: boolean;
+	/**
 	 * Present only for workflow runs (triggerType !== 'chat').
 	 * Contains the full workflow definition (steps, etc.) and the normalized
 	 * trigger context (type, triggerName, firedAt, payload) for the run.
@@ -481,9 +489,19 @@ export type AgentStreamEvent =
 	| { type: 'thinking_delta'; messageId: string; delta: string }
 	/**
 	 * Emitted when the LLM starts deciding on a tool call.
-	 * toolName may be empty at this stage — wait for tool_call_delta.
+	 * toolName is populated when the provider announces it up front (most do);
+	 * it may still be empty for providers that reveal the name later — the
+	 * final tool_call_delta always carries it.
 	 */
 	| { type: 'tool_call_start'; messageId: string; toolCallId: string; toolName: string }
+	/**
+	 * Snapshot of the render_ui tool's `code` argument while the LLM is still
+	 * streaming it, so the web UI can render the interface progressively.
+	 * toolCallId is the PLACEHOLDER id from tool_call_start (contentIndex as
+	 * string); snapshots are cumulative and idempotent — the final
+	 * tool_call_delta supersedes them. Throttled server-side (~120ms).
+	 */
+	| { type: 'render_ui_partial'; messageId: string; toolCallId: string; code: string }
 	/**
 	 * Emitted when the LLM finishes forming a tool call.
 	 * Carries the real toolCallId, the tool name, and the JSON-formatted arguments

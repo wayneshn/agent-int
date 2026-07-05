@@ -156,7 +156,8 @@ export class MessagePipeline {
 				}
 			});
 
-			// 7. Spawn the agent child process (non-blocking)
+			// 7. Spawn the agent child process (non-blocking). The channel gates UI
+			//    rendering — only web-channel turns register the render_ui tool.
 			await this.runtimeService.spawnForThread(
 				agentId,
 				threadId,
@@ -164,6 +165,8 @@ export class MessagePipeline {
 				'chat',
 				undefined,
 				userDatetime,
+				undefined,
+				channel,
 			);
 
 			return { ok: true, status: 201, userMessage, threadId };

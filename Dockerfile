@@ -26,6 +26,7 @@ COPY packages/types/package.json      packages/types/
 COPY packages/ui/package.json         packages/ui/
 COPY packages/utils/package.json      packages/utils/
 COPY packages/models/package.json     packages/models/
+COPY packages/openui/package.json     packages/openui/
 COPY packages/extractor/package.json  packages/extractor/
 COPY apps/backend/package.json        apps/backend/
 COPY apps/web/package.json            apps/web/
@@ -64,6 +65,7 @@ COPY packages/types/package.json      packages/types/
 COPY packages/ui/package.json         packages/ui/
 COPY packages/utils/package.json      packages/utils/
 COPY packages/models/package.json     packages/models/
+COPY packages/openui/package.json     packages/openui/
 COPY packages/extractor/package.json  packages/extractor/
 COPY apps/backend/package.json        apps/backend/
 COPY apps/web/package.json            apps/web/
@@ -82,6 +84,10 @@ COPY --from=builder /repo/packages/models/dist packages/models/dist
 
 # packages/utils compiled JS output
 COPY --from=builder /repo/packages/utils/dist  packages/utils/dist
+
+# packages/openui compiled JS output — imported at runtime by the process-driver
+# agent-runtime (render_ui tool prompt + validation)
+COPY --from=builder /repo/packages/openui/dist packages/openui/dist
 
 # packages/extractor compiled JS output — imported at runtime by the backend
 # (KnowledgeBaseService). Its exports "import" condition resolves to dist/index.js.

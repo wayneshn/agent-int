@@ -26,6 +26,7 @@
 		toolName,
 		toolDisplayName,
 		argsJson,
+		detailsLabel = 'Arguments',
 		result,
 		images,
 		isRunning = false,
@@ -37,6 +38,8 @@
 		toolDisplayName?: string;
 		/** Pretty-printed JSON args the LLM decided to pass — the "thinking context" */
 		argsJson?: string;
+		/** Heading for the argsJson section — defaults to 'Arguments' (tool calls) */
+		detailsLabel?: string;
 		/** Raw tool execution output returned to the agent */
 		result?: string;
 		/** Image content blocks returned by the tool (e.g. a browser screenshot) */
@@ -116,7 +119,7 @@
 					<p
 						class="mb-1 text-[10px] font-semibold tracking-wide text-muted-foreground/60 uppercase"
 					>
-						Arguments
+						{detailsLabel}
 					</p>
 					<pre
 						class="overflow-x-auto font-mono text-[11px] leading-relaxed wrap-break-word break-all whitespace-pre-wrap text-muted-foreground/80">{argsJson}</pre>

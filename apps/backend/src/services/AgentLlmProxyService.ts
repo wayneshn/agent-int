@@ -13,6 +13,13 @@ import { v4 as uuidv4 } from 'uuid';
 import type { ContentBlock, MessageTokenUsage } from '@repo/types';
 
 /**
+ * Minimum interval between render_ui_partial snapshots per tool call. The
+ * snapshots are cumulative, so throttling only affects update smoothness —
+ * the final tool_call_delta always carries the complete arguments.
+ */
+const UI_PARTIAL_THROTTLE_MS = 120;
+
+/**
  * Handles LLM proxy requests from agent child processes.
  *
  * Security model:
@@ -169,6 +176,8 @@ export class AgentLlmProxyService {
 		// Collect content blocks for persistence and return
 		const contentBlocks: ContentBlock[] = [];
 		let currentTextBlock: { type: 'text'; text: string } | null = null;
+		// Per-contentIndex throttle for render_ui_partial snapshots (progressive UI).
+		const uiPartialLastEmit = new Map<number, number>();
 
 		for await (const event of piStream) {
 			switch (event.type) {
@@ -206,18 +215,49 @@ export class AgentLlmProxyService {
 					});
 					break;
 
-				case 'toolcall_start':
+				case 'toolcall_start': {
 					// Emit a placeholder start event using the content index as a temporary ID.
-					// The real toolCallId and toolName are not yet known — they arrive at toolcall_end.
+					// The real toolCallId arrives at toolcall_end; the tool NAME is usually
+					// already known here (providers announce it up front) — forward it so the
+					// frontend can branch immediately (e.g. render_ui streaming layout).
+					const startBlock = event.partial.content[event.contentIndex];
 					this.streamBus.emit(tokenPayload.threadId, {
 						type: 'tool_call_start',
 						messageId,
 						toolCallId: String(event.contentIndex),
-						toolName: '',
+						toolName: startBlock?.type === 'toolCall' ? startBlock.name : '',
 					});
 					break;
+				}
+
+				case 'toolcall_delta': {
+					// Progressive UI: pi-ai keeps a best-effort parsed args object on the
+					// partial message (parseStreamingJson) — for render_ui, forward the
+					// code-so-far as a throttled, cumulative snapshot so the web UI can
+					// render the interface while the LLM is still writing it.
+					const deltaBlock = event.partial.content[event.contentIndex];
+					if (deltaBlock?.type === 'toolCall' && deltaBlock.name === 'render_ui') {
+						const code = (deltaBlock.arguments as { code?: unknown } | undefined)?.code;
+						const last = uiPartialLastEmit.get(event.contentIndex) ?? 0;
+						if (
+							typeof code === 'string' &&
+							code.length > 0 &&
+							Date.now() - last >= UI_PARTIAL_THROTTLE_MS
+						) {
+							uiPartialLastEmit.set(event.contentIndex, Date.now());
+							this.streamBus.emit(tokenPayload.threadId, {
+								type: 'render_ui_partial',
+								messageId,
+								toolCallId: String(event.contentIndex),
+								code,
+							});
+						}
+					}
+					break;
+				}
 
 				case 'toolcall_end': {
+					uiPartialLastEmit.delete(event.contentIndex);
 					const toolCall = event.toolCall;
 					contentBlocks.push({
 						type: 'toolCall',

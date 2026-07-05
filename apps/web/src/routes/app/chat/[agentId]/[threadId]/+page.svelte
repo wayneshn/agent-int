@@ -182,6 +182,7 @@
 		toolResults = buildToolResultsFromMessages(data.messages);
 		toolResultImages = buildToolResultImagesFromMessages(data.messages);
 		toolCallArgs = buildToolCallArgsFromMessages(data.messages);
+		streamingUiCode = {};
 		isStreaming = false;
 		threadStatus = data.thread.status;
 		streamingMessageId = null;
@@ -257,6 +258,15 @@
 	let toolCallArgs = $state<Record<string, { toolName: string; argsJson: string }>>(
 		buildToolCallArgsFromMessages(data.messages)
 	);
+
+	/**
+	 * Map of PLACEHOLDER toolCallId → render_ui code-so-far, fed by
+	 * render_ui_partial snapshots so the generated UI renders progressively
+	 * while the LLM is still writing it. Entries are dropped when the final
+	 * tool_call_delta upgrades the block (complete args take over) and the
+	 * whole map resets when the turn or thread changes.
+	 */
+	let streamingUiCode = $state<Record<string, string>>({});
 
 	/**
 	 * Pending HITL (Human-in-the-Loop) request from the agent.
@@ -574,6 +584,13 @@
 				break;
 			}
 
+			case 'render_ui_partial': {
+				// Cumulative snapshot of the render_ui code while the LLM writes it —
+				// keyed by the placeholder id so ChatMessage can stream-render the UI.
+				streamingUiCode = { ...streamingUiCode, [event.toolCallId]: event.code };
+				break;
+			}
+
 			case 'tool_call_delta': {
 				// Replace the placeholder block (keyed by placeholderId) with the real
 				// toolCallId and toolName now that the LLM has finished forming the call.
@@ -595,6 +612,12 @@
 					...toolCallArgs,
 					[event.toolCallId]: { toolName: event.toolName, argsJson: event.argsJson }
 				};
+				// The block id just changed — drop the streaming snapshot; the complete
+				// args now render via the normal path.
+				if (event.placeholderId in streamingUiCode) {
+					const { [event.placeholderId]: _dropped, ...rest } = streamingUiCode;
+					streamingUiCode = rest;
+				}
 				break;
 			}
 
@@ -670,6 +693,7 @@
 				// 'completed'/'error' in the DB; 'idle' here just means "not running").
 				if (threadStatus === 'running') threadStatus = 'idle';
 				streamingMessageId = null;
+				streamingUiCode = {};
 				// Clear any lingering HITL state (e.g. if the tool timed out)
 				pendingHitl = null;
 				clearOptimisticTimer();
@@ -696,6 +720,7 @@
 				isStreaming = false;
 				threadStatus = 'error';
 				streamingMessageId = null;
+				streamingUiCode = {};
 				pendingHitl = null;
 				clearOptimisticTimer();
 				// Replace any never-upgraded optimistic placeholder with the error
@@ -1091,11 +1116,13 @@
 							{toolResults}
 							{toolResultImages}
 							{toolCallArgs}
+							{streamingUiCode}
 							credentialMetaMap={data.credentialMetaMap}
 							attachments={attachmentsByMessageId[message.id] ?? []}
 							agentId={data.agent.id}
 							threadId={data.thread.id}
 							onOpenFile={openFile}
+							onUiAction={(text) => handleSend(text)}
 						/>
 					{/each}
 

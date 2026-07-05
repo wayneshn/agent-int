@@ -93,6 +93,9 @@ export async function runAgent(
 		// Register browser tools only when the host says they are available
 		// (agent has internet access + project browser feature enabled).
 		browserAvailable: config.browserAvailable ?? false,
+		// Register render_ui only for web-channel chat turns — external channels
+		// can't display interactive UI and must get plain text.
+		uiRenderingAvailable: config.uiRenderingAvailable ?? false,
 	});
 
 	// ── streamFn: routes every LLM call through the host proxy ────────────────
@@ -396,6 +399,49 @@ export async function runAgent(
 			`credentials for), tell the user honestly instead of retrying endlessly.\n` +
 			`- Never use the browser to attempt to bypass authentication, scrape at abusive ` +
 			`volume, or perform actions the user did not ask for.`;
+	}
+
+	// Generative UI guidance — only when the render_ui tool is registered
+	// (chat turns from the web channel).
+	if (config.uiRenderingAvailable) {
+		effectiveSystemPrompt +=
+			`\n\n## Interactive UI (render_ui)\n` +
+			`You can render interactive UI directly in the chat with the render_ui tool. ` +
+			`Prefer it over plain text whenever it presents the answer better:\n` +
+			`- Structured data → Table, KeyValue or ListBlock (never a markdown table when ` +
+			`render_ui is available)\n` +
+			`- Numeric comparisons, trends or proportions → BarChart / LineChart / PieChart ` +
+			`(only with real data — never invent numbers)\n` +
+			`- Headline metrics → Stat tiles in a Columns row\n` +
+			`- A set of choices for the user → Buttons; likely next questions → FollowUpBlock chips\n` +
+			`- Collecting several inputs → a Form with validation rules (its submitted values ` +
+			`come back to you as JSON in the user's next message)\n` +
+			`Design the UI like a small purpose-built app: group related content in Cards, lead ` +
+			`dashboards with a Columns row of Stats, use Tabs/Accordion for alternative or ` +
+			`optional detail, and end with FollowUpBlock chips when natural next questions exist.\n` +
+			`Guidelines: one render_ui call per logical view (combine sections in one Stack); ` +
+			`keep any accompanying text to a sentence or two; never paste OpenUI Lang code into ` +
+			`a plain-text reply. For long-form prose or simple one-line answers, plain text is ` +
+			`still better.`;
+
+		// Design preferences live in agent memory — only offer the workflow when
+		// the memory tools are actually functional (embedding model configured).
+		if (config.embeddingModelConfigId) {
+			effectiveSystemPrompt +=
+				`\n\n### UI design preferences\n` +
+				`Users can set persistent preferences for how your UIs look (accent color, table ` +
+				`density, chart style, layout taste).\n` +
+				`- Before your FIRST render_ui call in a conversation, memory_search for stored UI ` +
+				`design preferences (e.g. query "UI design preferences") and honor any hits by ` +
+				`setting the matching component props (accent, density, variant).\n` +
+				`- When the user expresses a UI design preference — "use green accents", "I prefer ` +
+				`compact tables", "always show charts as donuts" — memory_write it immediately as ` +
+				`type "procedural", phrased for direct reuse, e.g. "UI preference: use accent ` +
+				`\\"green\\" on cards, stats and charts." Do not duplicate preferences already ` +
+				`stored; if the user changes their mind, write the new preference and ` +
+				`memory_delete the old one.\n` +
+				`- Without a stored preference, omit accent props — the default theme accent applies.`;
+		}
 	}
 
 	// ── Tool restrictions (workspace boundary + no host exploration) ──────────

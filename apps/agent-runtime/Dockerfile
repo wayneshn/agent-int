@@ -24,6 +24,7 @@ COPY packages/types/package.json      packages/types/
 COPY packages/ui/package.json         packages/ui/
 COPY packages/utils/package.json      packages/utils/
 COPY packages/models/package.json     packages/models/
+COPY packages/openui/package.json     packages/openui/
 COPY apps/backend/package.json        apps/backend/
 COPY apps/web/package.json            apps/web/
 COPY apps/agent-runtime/package.json  apps/agent-runtime/
@@ -66,6 +67,7 @@ COPY packages/types/package.json      packages/types/
 COPY packages/ui/package.json         packages/ui/
 COPY packages/utils/package.json      packages/utils/
 COPY packages/models/package.json     packages/models/
+COPY packages/openui/package.json     packages/openui/
 COPY apps/backend/package.json        apps/backend/
 COPY apps/web/package.json            apps/web/
 COPY apps/agent-runtime/package.json  apps/agent-runtime/
@@ -81,6 +83,9 @@ COPY --from=builder /repo/packages/types/src   packages/types/src
 COPY --from=builder /repo/packages/utils/dist  packages/utils/dist
 COPY --from=builder /repo/packages/utils/src/integrations/definitions  packages/utils/src/integrations/definitions
 COPY --from=builder /repo/packages/utils/src/skills                    packages/utils/src/skills
+
+# packages/openui compiled output — render_ui tool prompt + validation
+COPY --from=builder /repo/packages/openui/dist  packages/openui/dist
 
 # Agent-runtime compiled output
 COPY --from=builder /repo/apps/agent-runtime/dist  apps/agent-runtime/dist

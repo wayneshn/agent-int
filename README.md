@@ -1,3 +1,5 @@
+
+https://github.com/user-attachments/assets/0364d96e-1f0d-482b-81d6-733cb06bdcd0
 # Valmis - The OpenClaw alternative designed for work, with security in mind
 
 Valmis is a cloud-based application for shipping AI agents for production work. It allows you to build a fleet of agents that can talk to 100+ business and productivity integrations. The system is designed with security in mind, and agents run in isolated containers, meaning AI never gets access to your API credentials or your host files.
@@ -16,7 +18,7 @@ Each agent has its own file system and is completely isolated from the host mach
 
 Agents can only work for you when they have access (safely) to your apps. Our proxy system now supports 100+ business and productivity integrations, including all Google Workspace apps, Slack, Notion, Hubspot, Salesforce, and Figma. See [integrations](packages/utils/src/integrations/definitions) folder for all currently supported apps. Each agent you create can be assigned access to specific (or all) credentials, and this boundary is strictly followed at the code level. You can then talk to the agent to complete certain tasks, and agents will formulate proxy requests to the host machine to actually send the requests.
 
-https://github.com/user-attachments/assets/d20ad083-2485-4e73-9410-20e218b1c7b7
+https://github.com/user-attachments/assets/65711577-01c7-4bac-93af-37c499a21a10
 
 [Watch intro on Youtube](https://www.youtube.com/watch?v=-R6ea1UYge0)
 

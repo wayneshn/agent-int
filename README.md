@@ -1,5 +1,4 @@
 
-https://github.com/user-attachments/assets/0364d96e-1f0d-482b-81d6-733cb06bdcd0
 # Valmis - The OpenClaw alternative designed for work, with security in mind
 
 Valmis is a cloud-based application for shipping AI agents for production work. It allows you to build a fleet of agents that can talk to 100+ business and productivity integrations. The system is designed with security in mind, and agents run in isolated containers, meaning AI never gets access to your API credentials or your host files.

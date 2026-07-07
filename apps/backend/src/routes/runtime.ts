@@ -12,6 +12,7 @@ import {
 	type ChatUploadInput,
 } from '../services/ChatFileService.js';
 import { AgentRuntimeService } from '../services/AgentRuntimeService.js';
+import { AgentMessagingService } from '../services/AgentMessagingService.js';
 import { AgentProxyService } from '../services/AgentProxyService.js';
 import { AgentLlmProxyService } from '../services/AgentLlmProxyService.js';
 import { AgentMemoryService } from '../services/AgentMemoryService.js';
@@ -45,6 +46,7 @@ import type {
 	MemoryWriteRequest,
 	MemorySearchRequest,
 	MemoryDeleteRequest,
+	AgentMessageRequest,
 	SkillTraceRequestBody,
 	ContentBlock,
 	WorkflowSummary,
@@ -125,6 +127,7 @@ export function createRuntimeRouter(
 	skillService: SkillService,
 	browserService: BrowserService,
 	chatFileService: ChatFileService,
+	messagingService: AgentMessagingService,
 ): Router {
 	const router = Router();
 	const auth = requireAuth(authService);
@@ -1550,6 +1553,115 @@ export function createRuntimeRouter(
 			logger.error({ err, agentId: sandboxToken.agentId }, '[runtime] workflow trigger failed');
 			res.status(500).json({ success: false, error: message });
 		}
+	});
+
+	// ─── Agent-to-agent messaging endpoints (PROXY_TOKEN auth) ────────────────
+
+	/**
+	 * GET /v1/runtime/internal/agents
+	 * Sandbox lists the agents the current agent is permitted to message (its
+	 * collaborator allow-list). Powers the list_agents tool. agentId is derived from
+	 * the PROXY_TOKEN — an agent can only see its own collaborators.
+	 */
+	router.get('/internal/agents', async (req: Request, res: Response) => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		try {
+			const collaborators = await messagingService.listCollaborators(sandboxToken.agentId);
+			res.json({ success: true, data: collaborators });
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Failed to list agents';
+			logger.error({ err, agentId: sandboxToken.agentId }, '[runtime] list agents failed');
+			res.status(500).json({ success: false, error: message });
+		}
+	});
+
+	/**
+	 * POST /v1/runtime/internal/agent/:targetAgentId/message
+	 * Async agent-to-agent hand-off. Spawns the target agent in a new thread and
+	 * returns immediately with { threadId, threadUrl }. Caller identity (agent +
+	 * thread + owner) comes from the PROXY_TOKEN; the allow-list, delegation depth,
+	 * and cycle checks are enforced host-side in AgentMessagingService.
+	 */
+	router.post('/internal/agent/:targetAgentId/message', async (req: Request, res: Response) => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		const { targetAgentId } = req.params as { targetAgentId: string };
+		try {
+			const { message, context } = (req.body ?? {}) as AgentMessageRequest;
+			const result = await messagingService.sendMessage({
+				callerAgentId: sandboxToken.agentId,
+				callerThreadId: sandboxToken.threadId,
+				ownerId: sandboxToken.ownerId,
+				targetAgentId,
+				message,
+				context,
+			});
+			if (!result.ok) {
+				res.status(result.status).json({ success: false, error: result.error });
+				return;
+			}
+			res.status(201).json({
+				success: true,
+				data: { threadId: result.threadId, threadUrl: result.threadUrl },
+			});
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Failed to message agent';
+			logger.error({ err, targetAgentId }, '[runtime] a2a message failed');
+			res.status(500).json({ success: false, error: message });
+		}
+	});
+
+	/**
+	 * POST /v1/runtime/internal/agent/:targetAgentId/ask
+	 * Agent-to-agent delegation with an answer. Spawns the target agent and returns
+	 * 202 { threadId } immediately; the sandbox polls GET /internal/agent/ask/:threadId
+	 * for the outcome. (No held connection — undici's default 5-min headersTimeout on
+	 * the sandbox side would kill longer delegations.) Same host-side guards as /message.
+	 */
+	router.post('/internal/agent/:targetAgentId/ask', async (req: Request, res: Response) => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		const { targetAgentId } = req.params as { targetAgentId: string };
+		try {
+			const { message, context } = (req.body ?? {}) as AgentMessageRequest;
+			const result = await messagingService.startAsk({
+				callerAgentId: sandboxToken.agentId,
+				callerThreadId: sandboxToken.threadId,
+				ownerId: sandboxToken.ownerId,
+				targetAgentId,
+				message,
+				context,
+			});
+			if (!result.ok) {
+				res.status(result.status).json({ success: false, error: result.error });
+				return;
+			}
+			res.status(202).json({ success: true, data: { threadId: result.threadId } });
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Failed to ask agent';
+			logger.error({ err, targetAgentId }, '[runtime] a2a ask failed');
+			res.status(500).json({ success: false, error: message });
+		}
+	});
+
+	/**
+	 * GET /v1/runtime/internal/agent/ask/:threadId
+	 * Poll a pending ask started via the route above. Returns AgentAskPollResult:
+	 * { status: 'running' } while the target works, then 'completed' with the final
+	 * text or 'error'. Only the initiating agent+thread (from the PROXY_TOKEN) may
+	 * read it.
+	 */
+	router.get('/internal/agent/ask/:threadId', (req: Request, res: Response) => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		const { threadId } = req.params as { threadId: string };
+		const result = messagingService.getAskResult(
+			sandboxToken.agentId,
+			sandboxToken.threadId,
+			threadId,
+		);
+		if (!result.ok) {
+			res.status(result.status).json({ success: false, error: result.error });
+			return;
+		}
+		res.json({ success: true, data: result.result });
 	});
 
 	// ─── Memory internal endpoints (PROXY_TOKEN auth) ─────────────────────────

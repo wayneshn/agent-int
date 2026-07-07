@@ -141,6 +141,13 @@
       "when": 1782591434333,
       "tag": "0019_lumpy_alice",
       "breakpoints": true
+    },
+    {
+      "idx": 20,
+      "version": "7",
+      "when": 1783352889212,
+      "tag": "0020_chubby_zaladane",
+      "breakpoints": true
     }
   ]
 }

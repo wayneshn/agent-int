@@ -26,6 +26,12 @@ export interface Agent {
 	/** IDs of credentials this agent has access to (the explicit manual selection) */
 	credentialIds: string[];
 	/**
+	 * IDs of other agents this agent is allowed to message via the agent-to-agent
+	 * tools (list_agents / send_to_agent / ask_agent). Default-deny — empty means the
+	 * agent has no messaging capability. All targets must belong to the same owner.
+	 */
+	collaboratorIds: string[];
+	/**
 	 * When true, the agent uses ALL of the owner's credentials (current and any
 	 * added later), overriding `credentialIds`. Default false.
 	 */
@@ -144,6 +150,8 @@ export interface CreateAgentRequestBody {
 	systemInstruction?: string;
 	avatarUrl?: string;
 	credentialIds?: string[];
+	/** IDs of other agents this agent may message (agent-to-agent allow-list). */
+	collaboratorIds?: string[];
 	/** When true, the agent uses all of the owner's credentials (current and future). */
 	allCredentials?: boolean;
 	modelConfigId?: string;
@@ -161,6 +169,8 @@ export interface UpdateAgentRequestBody {
 	systemInstruction?: string;
 	avatarUrl?: string;
 	credentialIds?: string[];
+	/** IDs of other agents this agent may message (agent-to-agent allow-list). */
+	collaboratorIds?: string[];
 	/** When true, the agent uses all of the owner's credentials (current and future). */
 	allCredentials?: boolean;
 	modelConfigId?: string;
@@ -186,7 +196,7 @@ export interface AgentRunSummary {
 	/** Thread lifecycle status */
 	status: 'idle' | 'running' | 'completed' | 'error';
 	/** How this thread was initiated */
-	triggerType: 'chat' | 'cron' | 'webhook' | 'manual';
+	triggerType: 'chat' | 'cron' | 'webhook' | 'manual' | 'app' | 'agent';
 	/** Total number of messages in the thread (all roles) */
 	messageCount: number;
 	/** Number of tool_result messages (proxy for tool calls made) */

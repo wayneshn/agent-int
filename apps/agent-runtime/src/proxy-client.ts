@@ -11,6 +11,11 @@ import type {
 	MemorySearchRequest,
 	MemoryDeleteRequest,
 	MemoryDeleteResponse,
+	AgentCollaboratorSummary,
+	AgentMessageResult,
+	AgentAskStartResult,
+	AgentAskPollResult,
+	AgentAskResult,
 	BrowserActionRequest,
 	BrowserActionResult,
 	SkillTraceRequestBody,
@@ -32,6 +37,15 @@ import type {
 // completion and the credential-proxied external API). Both overridable via env.
 const CONTROL_TIMEOUT_MS = parseInt(process.env.RUNTIME_PROXY_CONTROL_TIMEOUT_MS ?? '120000', 10);
 const IO_TIMEOUT_MS = parseInt(process.env.RUNTIME_PROXY_IO_TIMEOUT_MS ?? '600000', 10);
+
+// ask_agent polling cadence and overall deadline. The deadline sits slightly above
+// the host's 20-min ask window (AGENT_MESSAGE_ASK_TIMEOUT_MS) so the host's own
+// timeout resolves first with a clean error. Both overridable via env.
+const ASK_POLL_INTERVAL_MS = parseInt(process.env.RUNTIME_ASK_POLL_INTERVAL_MS ?? '5000', 10);
+const ASK_OVERALL_TIMEOUT_MS = parseInt(
+	process.env.RUNTIME_ASK_OVERALL_TIMEOUT_MS ?? String(25 * 60 * 1000),
+	10,
+);
 
 /**
  * HTTP client for communication between the agent sandbox and the host backend.
@@ -493,6 +507,133 @@ export class ProxyClient {
 			throw new Error(`Trigger workflow failed: ${json.error ?? 'unknown error'}`);
 		}
 		return json.data;
+	}
+
+	// ─── Agent-to-agent messaging ──────────────────────────────────────────────
+
+	/**
+	 * List the agents this agent is permitted to message (its collaborator allow-list).
+	 * The host scopes the query to sandboxToken.agentId.
+	 */
+	async listAgents(): Promise<AgentCollaboratorSummary[]> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/agents`, {
+			headers: this.authHeaders(),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+
+		const json = (await res.json()) as {
+			success: boolean;
+			data?: AgentCollaboratorSummary[];
+			error?: string;
+		};
+		if (!json.success || !json.data) {
+			throw new Error(`List agents failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	/**
+	 * Send a message to another agent (async hand-off). The host spawns the target
+	 * agent (reusing the existing delegation thread for follow-ups) and returns
+	 * immediately with the thread id. The target runs independently — no result is
+	 * streamed back to this turn.
+	 */
+	async sendToAgent(
+		targetAgentId: string,
+		message: string,
+		context?: string,
+	): Promise<AgentMessageResult> {
+		const res = await fetch(
+			`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/message`,
+			{
+				method: 'POST',
+				headers: this.authHeaders(),
+				body: JSON.stringify({ message, context }),
+				signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+			},
+		);
+
+		const json = (await res.json()) as {
+			success: boolean;
+			data?: AgentMessageResult;
+			error?: string;
+		};
+		if (!json.success || !json.data) {
+			throw new Error(`Send to agent failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	/**
+	 * Ask another agent and wait for its answer (delegation with a result). The host
+	 * spawns the target and returns 202 + threadId immediately; this client then POLLS
+	 * the ask-result endpoint until the target's run settles. Polling (short requests)
+	 * rather than one held connection because undici's default 5-min headersTimeout
+	 * would abort any longer delegation regardless of the abort signal. The overall
+	 * deadline (25 min) sits slightly above the host's 20-min ask window so the host's
+	 * own timeout resolves first with a clean error.
+	 */
+	async askAgent(
+		targetAgentId: string,
+		message: string,
+		context?: string,
+	): Promise<AgentAskResult> {
+		const started = await fetch(
+			`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/ask`,
+			{
+				method: 'POST',
+				headers: this.authHeaders(),
+				body: JSON.stringify({ message, context }),
+				signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+			},
+		);
+		const startJson = (await started.json()) as {
+			success: boolean;
+			data?: AgentAskStartResult;
+			error?: string;
+		};
+		if (!startJson.success || !startJson.data) {
+			throw new Error(`Ask agent failed: ${startJson.error ?? 'unknown error'}`);
+		}
+		const { threadId } = startJson.data;
+
+		const deadline = Date.now() + ASK_OVERALL_TIMEOUT_MS;
+		while (Date.now() < deadline) {
+			await new Promise((r) => setTimeout(r, ASK_POLL_INTERVAL_MS));
+
+			let poll: AgentAskPollResult;
+			try {
+				const res = await fetch(`${this.baseUrl}/v1/runtime/internal/agent/ask/${threadId}`, {
+					headers: this.authHeaders(),
+					signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+				});
+				const json = (await res.json()) as {
+					success: boolean;
+					data?: AgentAskPollResult;
+					error?: string;
+				};
+				if (!json.success || !json.data) {
+					// 404 = the pending ask is gone (swept or host restarted) — terminal.
+					throw new Error(`Ask agent failed: ${json.error ?? 'unknown error'}`);
+				}
+				poll = json.data;
+			} catch (err) {
+				// Transient network errors must not kill a delegation that is still
+				// running host-side — keep polling until the deadline. Terminal host
+				// answers ("Ask agent failed: …") are re-thrown.
+				if (err instanceof Error && err.message.startsWith('Ask agent failed:')) throw err;
+				continue;
+			}
+
+			if (poll.status === 'completed') {
+				return { response: poll.response, threadId: poll.threadId };
+			}
+			if (poll.status === 'error') {
+				throw new Error(`Ask agent failed: ${poll.error}`);
+			}
+			// status 'running' — keep polling
+		}
+		throw new Error('Ask agent failed: timed out waiting for the agent to finish.');
 	}
 
 	// ─── Browser ──────────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@
 	import PageHeader from '$lib/components/page-header.svelte';
 	import AgentSkillsPanel from '$lib/components/custom/agent-skills-panel.svelte';
 	import AgentCredentialsPanel from '$lib/components/custom/agent-credentials-panel.svelte';
+	import AgentCollaboratorsPanel from '$lib/components/custom/agent-collaborators-panel.svelte';
 	import AgentKnowledgePanel from '$lib/components/custom/knowledge/agent-knowledge-panel.svelte';
 	import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
 	import BrainIcon from '@lucide/svelte/icons/brain';
@@ -70,6 +71,8 @@
 	let emojiPickerOpen = $state(false);
 	let selectedCredentialIds = $state<Set<string>>(new Set(agent?.credentialIds ?? []));
 	let allCredentials = $state<boolean>(agent?.allCredentials ?? false);
+	/** Agent-to-agent collaborator selections — same diff/serialise pattern as credentials */
+	let selectedCollaboratorIds = $state<Set<string>>(new Set(agent?.collaboratorIds ?? []));
 	let selectedModelConfigId = $state<string>(agent?.modelConfigId ?? '');
 	let selectedEmbeddingModelConfigId = $state<string>(agent?.embeddingModelConfigId ?? '');
 	/** Skill selections — same pattern as credential checkboxes */
@@ -204,6 +207,10 @@
 	     allCredentials is on, so the manual selection is preserved if it's turned off) -->
 	{#each [...selectedCredentialIds] as credId (credId)}
 		<input type="hidden" name="credentialIds" value={credId} />
+	{/each}
+	<!-- Collaborator agent IDs: one hidden input per selected collaborator -->
+	{#each [...selectedCollaboratorIds] as collaboratorId (collaboratorId)}
+		<input type="hidden" name="collaboratorIds" value={collaboratorId} />
 	{/each}
 	<!-- Skill names: one hidden input per selected skill -->
 	{#each [...selectedSkillNames] as skillName (skillName)}
@@ -444,6 +451,18 @@
 		bind:allCredentials
 		{credentials}
 		{definitions}
+	/>
+
+	<!-- ── Agent Collaborators (agent-to-agent messaging) ────────────────────── -->
+	<!--
+		Checkboxes in the component update `selectedCollaboratorIds` (a Set).
+		Hidden inputs above serialise it into repeated `collaboratorIds` form fields;
+		AgentService replaces the agent_collaborators links on save.
+	-->
+	<AgentCollaboratorsPanel
+		bind:selectedCollaboratorIds
+		agents={data.agents ?? []}
+		currentAgentId={isEditMode ? agent?.id : null}
 	/>
 
 	<!-- ── Knowledge Base ────────────────────────────────────────────────────── -->

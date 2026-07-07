@@ -22,6 +22,9 @@ import ClockIcon from '@lucide/svelte/icons/clock';
 import ArrowLeftIcon from '@lucide/svelte/icons/arrow-left';
 import ArrowRightIcon from '@lucide/svelte/icons/arrow-right';
 import LayoutIcon from '@lucide/svelte/icons/layout-template';
+import UsersIcon from '@lucide/svelte/icons/users';
+import SendIcon from '@lucide/svelte/icons/send';
+import MessagesSquareIcon from '@lucide/svelte/icons/messages-square';
 
 /**
  * Maps built-in agent tool names to their Lucide icon constructors.
@@ -43,6 +46,9 @@ export const TOOL_ICON_MAP: Record<string, typeof WrenchIcon> = {
 	read_workflow: FileSearchIcon,
 	trigger_workflow: PlayIcon,
 	create_workflow: PlusCircleIcon,
+	list_agents: UsersIcon,
+	send_to_agent: SendIcon,
+	ask_agent: MessagesSquareIcon,
 	browser_navigate: GlobeIcon,
 	browser_snapshot: ScanLineIcon,
 	browser_click: MousePointerClickIcon,

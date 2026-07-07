@@ -2,8 +2,8 @@ import { eq, and, inArray, sql } from 'drizzle-orm';
 import { rmSync } from 'fs';
 import { resolve } from 'path';
 import { db } from '../db/index.js';
-import { agents, agentCredentials, agentMemory } from '../db/schema/index.js';
-import type { Agent, AgentMemoryEntry, MemoryType } from '@repo/types';
+import { agents, agentCredentials, agentCollaborators, agentMemory } from '../db/schema/index.js';
+import type { Agent, AgentCollaboratorSummary, AgentMemoryEntry, MemoryType } from '@repo/types';
 import { logger } from '../config/logger.js';
 
 // ─── Input Types ──────────────────────────────────────────────────────────────
@@ -15,6 +15,8 @@ export interface CreateAgentInput {
 	systemInstruction?: string;
 	avatarUrl?: string;
 	credentialIds?: string[];
+	/** IDs of other agents this agent may message (agent-to-agent allow-list). */
+	collaboratorIds?: string[];
 	allCredentials?: boolean;
 	modelConfigId?: string;
 	embeddingModelConfigId?: string;
@@ -29,6 +31,8 @@ export interface UpdateAgentInput {
 	systemInstruction?: string;
 	avatarUrl?: string;
 	credentialIds?: string[];
+	/** IDs of other agents this agent may message (agent-to-agent allow-list). */
+	collaboratorIds?: string[];
 	allCredentials?: boolean;
 	modelConfigId?: string | null;
 	embeddingModelConfigId?: string | null;
@@ -68,8 +72,12 @@ export interface AgentMemorySearchRow extends AgentMemoryEntry {
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
-/** Map a DB row + credentialIds array to the Agent API type */
-function rowToAgent(row: typeof agents.$inferSelect, credentialIds: string[]): Agent {
+/** Map a DB row + credentialIds/collaboratorIds arrays to the Agent API type */
+function rowToAgent(
+	row: typeof agents.$inferSelect,
+	credentialIds: string[],
+	collaboratorIds: string[],
+): Agent {
 	return {
 		id: row.id,
 		ownerId: row.ownerId,
@@ -78,6 +86,7 @@ function rowToAgent(row: typeof agents.$inferSelect, credentialIds: string[]): A
 		systemInstruction: row.systemInstruction ?? undefined,
 		avatarUrl: row.avatarUrl ?? undefined,
 		credentialIds,
+		collaboratorIds,
 		allCredentials: row.allCredentials,
 		modelConfigId: row.modelConfigId ?? undefined,
 		embeddingModelConfigId: row.embeddingModelConfigId ?? undefined,
@@ -110,6 +119,27 @@ function rowToMemoryEntry(row: typeof agentMemory.$inferSelect): AgentMemoryEntr
  * Ownership is enforced at the DB layer — all queries include ownerId in WHERE.
  */
 export class AgentService {
+	/**
+	 * Sanitize a collaborator allow-list before writing it: dedup, drop the agent's
+	 * own id, and keep ONLY agents that exist and belong to ownerId. This is the
+	 * write-time enforcement of the same-owner invariant that listCollaborators and
+	 * the A2A messaging path rely on — without it a caller could link (and leak
+	 * metadata about) another tenant's agent by submitting its UUID.
+	 */
+	private async sanitizeCollaboratorIds(
+		ids: string[],
+		ownerId: string,
+		selfId?: string,
+	): Promise<string[]> {
+		const unique = [...new Set(ids)].filter((targetId) => targetId !== selfId);
+		if (unique.length === 0) return [];
+		const rows = await db
+			.select({ id: agents.id })
+			.from(agents)
+			.where(and(inArray(agents.id, unique), eq(agents.ownerId, ownerId)));
+		return rows.map((r) => r.id);
+	}
+
 	/** Create a new agent and link credential access */
 	async create(input: CreateAgentInput): Promise<Agent> {
 		const now = new Date();
@@ -143,7 +173,26 @@ export class AgentService {
 			);
 		}
 
-		return rowToAgent(row, input.credentialIds ?? []);
+		// Insert collaborator (agent-to-agent allow-list) junction rows — sanitized to
+		// the owner's own agents (dedup + same-owner check).
+		let collaboratorIds: string[] = [];
+		if (input.collaboratorIds && input.collaboratorIds.length > 0) {
+			collaboratorIds = await this.sanitizeCollaboratorIds(
+				input.collaboratorIds,
+				input.ownerId,
+				row.id,
+			);
+			if (collaboratorIds.length > 0) {
+				await db.insert(agentCollaborators).values(
+					collaboratorIds.map((targetAgentId) => ({
+						agentId: row.id,
+						targetAgentId,
+					})),
+				);
+			}
+		}
+
+		return rowToAgent(row, input.credentialIds ?? [], collaboratorIds);
 	}
 
 	/** List all agents for an owner with their linked credential IDs */
@@ -171,7 +220,19 @@ export class AgentService {
 			credMap.set(link.agentId, existing);
 		}
 
-		return rows.map((row) => rowToAgent(row, credMap.get(row.id) ?? []));
+		// Fetch and group collaborator links the same way
+		const collabLinks = await db
+			.select()
+			.from(agentCollaborators)
+			.where(inArray(agentCollaborators.agentId, agentIds));
+		const collabMap = new Map<string, string[]>();
+		for (const link of collabLinks) {
+			const existing = collabMap.get(link.agentId) ?? [];
+			existing.push(link.targetAgentId);
+			collabMap.set(link.agentId, existing);
+		}
+
+		return rows.map((row) => rowToAgent(row, credMap.get(row.id) ?? [], collabMap.get(row.id) ?? []));
 	}
 
 	/**
@@ -188,9 +249,15 @@ export class AgentService {
 			.from(agentCredentials)
 			.where(eq(agentCredentials.agentId, id));
 
+		const collabLinks = await db
+			.select({ targetAgentId: agentCollaborators.targetAgentId })
+			.from(agentCollaborators)
+			.where(eq(agentCollaborators.agentId, id));
+
 		return rowToAgent(
 			rows[0],
 			credLinks.map((l) => l.credentialId),
+			collabLinks.map((l) => l.targetAgentId),
 		);
 	}
 
@@ -210,10 +277,40 @@ export class AgentService {
 			.from(agentCredentials)
 			.where(eq(agentCredentials.agentId, id));
 
+		const collabLinks = await db
+			.select({ targetAgentId: agentCollaborators.targetAgentId })
+			.from(agentCollaborators)
+			.where(eq(agentCollaborators.agentId, id));
+
 		return rowToAgent(
 			row,
 			credLinks.map((l) => l.credentialId),
+			collabLinks.map((l) => l.targetAgentId),
 		);
+	}
+
+	/**
+	 * List the collaborator agents this agent is allowed to message, with display
+	 * metadata (id, name, description). Joined to agents so the caller gets names
+	 * for the list_agents tool. No ownership check here — same-owner is enforced at
+	 * write time (create/update run collaboratorIds through sanitizeCollaboratorIds).
+	 */
+	async listCollaborators(agentId: string): Promise<AgentCollaboratorSummary[]> {
+		const rows = await db
+			.select({
+				id: agents.id,
+				name: agents.name,
+				description: agents.description,
+			})
+			.from(agentCollaborators)
+			.innerJoin(agents, eq(agents.id, agentCollaborators.targetAgentId))
+			.where(eq(agentCollaborators.agentId, agentId))
+			.orderBy(agents.name);
+		return rows.map((r) => ({
+			id: r.id,
+			name: r.name,
+			description: r.description ?? undefined,
+		}));
 	}
 
 	/** Update an agent's configuration. Replaces credential links entirely. */
@@ -263,6 +360,23 @@ export class AgentService {
 					input.credentialIds.map((credentialId) => ({
 						agentId: id,
 						credentialId,
+					})),
+				);
+			}
+		}
+
+		// Replace collaborator (agent-to-agent) links if provided. The list is
+		// sanitized BEFORE the delete so a bad input (duplicate ids, foreign-tenant
+		// or deleted agent ids, self-link) can neither wipe the existing allow-list
+		// via a failed insert nor store a cross-owner link.
+		if (input.collaboratorIds !== undefined) {
+			const targets = await this.sanitizeCollaboratorIds(input.collaboratorIds, ownerId, id);
+			await db.delete(agentCollaborators).where(eq(agentCollaborators.agentId, id));
+			if (targets.length > 0) {
+				await db.insert(agentCollaborators).values(
+					targets.map((targetAgentId) => ({
+						agentId: id,
+						targetAgentId,
 					})),
 				);
 			}

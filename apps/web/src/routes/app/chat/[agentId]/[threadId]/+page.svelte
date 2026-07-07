@@ -13,6 +13,7 @@
 	import FilePreviewSidebar from '$lib/components/custom/chat/FilePreviewSidebar.svelte';
 	import AgentAvatar from '$lib/components/custom/chat/AgentAvatar.svelte';
 	import HitlPrompt from '$lib/components/custom/chat/HitlPrompt.svelte';
+	import AgentDelegationIndicator from '$lib/components/custom/chat/AgentDelegationIndicator.svelte';
 	import EditThreadTitleDialog from '$lib/components/custom/chat/EditThreadTitleDialog.svelte';
 	import BrowserSessionDialog from '$lib/components/custom/chat/BrowserSessionDialog.svelte';
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
@@ -274,6 +275,17 @@
 	 * While set, the ChatInput is unlocked even though isStreaming=true.
 	 */
 	let pendingHitl = $state<{ prompt: string; options?: string[] } | null>(null);
+
+	/**
+	 * In-flight agent-to-agent delegation (this agent is blocked in ask_agent waiting
+	 * for another agent). Set by the `agent_delegation` SSE event ('started'); cleared
+	 * on 'completed'/'error' and defensively on turn end.
+	 */
+	let pendingDelegation = $state<{
+		targetAgentId: string;
+		targetAgentName: string;
+		targetThreadId: string;
+	} | null>(null);
 
 	/**
 	 * The agent is working this thread's turn — true while the live stream is
@@ -677,6 +689,22 @@
 				break;
 			}
 
+			case 'agent_delegation': {
+				// This agent is asking another agent and waiting for its answer.
+				// Show the waiting indicator while the delegation is in flight.
+				if (event.state === 'started') {
+					pendingDelegation = {
+						targetAgentId: event.targetAgentId,
+						targetAgentName: event.targetAgentName,
+						targetThreadId: event.targetThreadId
+					};
+					scrollToBottom();
+				} else {
+					pendingDelegation = null;
+				}
+				break;
+			}
+
 			case 'thread_title_updated': {
 				// Update the title of the active thread in the sidebar immediately.
 				threads = threads.map((t) => (t.id === event.threadId ? { ...t, title: event.title } : t));
@@ -694,8 +722,9 @@
 				if (threadStatus === 'running') threadStatus = 'idle';
 				streamingMessageId = null;
 				streamingUiCode = {};
-				// Clear any lingering HITL state (e.g. if the tool timed out)
+				// Clear any lingering HITL / delegation state (e.g. if the tool timed out)
 				pendingHitl = null;
+				pendingDelegation = null;
 				clearOptimisticTimer();
 				// Drop a never-upgraded optimistic placeholder so the turn doesn't end
 				// with a stale empty assistant bubble (e.g. runtime never started).
@@ -722,6 +751,7 @@
 				streamingMessageId = null;
 				streamingUiCode = {};
 				pendingHitl = null;
+				pendingDelegation = null;
 				clearOptimisticTimer();
 				// Replace any never-upgraded optimistic placeholder with the error
 				// message rather than leaving an empty bubble beside it.
@@ -1132,6 +1162,15 @@
 							prompt={pendingHitl.prompt}
 							options={pendingHitl.options}
 							onSelectOption={(option) => handleSend(option)}
+						/>
+					{/if}
+
+					<!-- A2A delegation — shown while this agent waits on another agent -->
+					{#if pendingDelegation}
+						<AgentDelegationIndicator
+							targetAgentName={pendingDelegation.targetAgentName}
+							targetAgentId={pendingDelegation.targetAgentId}
+							targetThreadId={pendingDelegation.targetThreadId}
 						/>
 					{/if}
 

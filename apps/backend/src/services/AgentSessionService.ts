@@ -23,6 +23,12 @@ export interface CreateThreadInput {
 	triggerPayload?: Record<string, unknown>;
 	/** Mark this thread as created by a workflow execution (non-chat trigger with workflowId) */
 	isWorkflowThread?: boolean;
+	/** A2A lineage — the agent that sent the message that spawned this thread (triggerType 'agent') */
+	initiatorAgentId?: string;
+	/** A2A lineage — the initiating agent's thread */
+	parentThreadId?: string;
+	/** A2A lineage — server-derived delegation chain (root → initiator) for depth/cycle checks */
+	delegationChain?: string[];
 }
 
 export interface AppendMessageInput {
@@ -49,6 +55,9 @@ function rowToThread(row: typeof agentThreads.$inferSelect): AgentThread {
 		contextTokens: row.contextTokens ?? undefined,
 		isWorkflowThread: row.isWorkflowThread,
 		isPinned: row.isPinned,
+		initiatorAgentId: row.initiatorAgentId ?? undefined,
+		parentThreadId: row.parentThreadId ?? undefined,
+		delegationChain: (row.delegationChain as string[] | null) ?? undefined,
 		createdAt: row.createdAt,
 		updatedAt: row.updatedAt,
 	};
@@ -90,6 +99,9 @@ export class AgentSessionService {
 				triggerId: input.triggerId ?? null,
 				triggerPayload: input.triggerPayload ?? null,
 				isWorkflowThread: input.isWorkflowThread ?? false,
+				initiatorAgentId: input.initiatorAgentId ?? null,
+				parentThreadId: input.parentThreadId ?? null,
+				delegationChain: input.delegationChain ?? null,
 				createdAt: now,
 				updatedAt: now,
 			})
@@ -113,6 +125,33 @@ export class AgentSessionService {
 	 */
 	async getThreadByIdInternal(id: string): Promise<AgentThread | null> {
 		const rows = await db.select().from(agentThreads).where(eq(agentThreads.id, id)).limit(1);
+		return rows[0] ? rowToThread(rows[0]) : null;
+	}
+
+	/**
+	 * Find the existing agent-to-agent delegation thread for (caller thread → target
+	 * agent), newest first. Used so follow-up messages from the same caller turn/thread
+	 * continue in the SAME target conversation — the target keeps its context instead
+	 * of starting cold each time. No ownership check — internal use only (the A2A
+	 * authorization runs in AgentMessagingService before this is called).
+	 */
+	async findDelegationThread(
+		targetAgentId: string,
+		callerThreadId: string,
+		callerAgentId: string,
+	): Promise<AgentThread | null> {
+		const rows = await db
+			.select()
+			.from(agentThreads)
+			.where(
+				and(
+					eq(agentThreads.agentId, targetAgentId),
+					eq(agentThreads.parentThreadId, callerThreadId),
+					eq(agentThreads.initiatorAgentId, callerAgentId),
+				),
+			)
+			.orderBy(desc(agentThreads.createdAt))
+			.limit(1);
 		return rows[0] ? rowToThread(rows[0]) : null;
 	}
 
@@ -280,6 +319,15 @@ export class AgentSessionService {
 			})
 			.returning();
 		return rowToMessage(row);
+	}
+
+	/**
+	 * Delete a single message by id — no ownership check, internal use only. Used to
+	 * roll back an A2A delivery whose target run never started (declined/failed
+	 * spawn), so the undelivered message is not re-processed by a later run.
+	 */
+	async deleteMessageInternal(messageId: string): Promise<void> {
+		await db.delete(agentMessages).where(eq(agentMessages.id, messageId));
 	}
 
 	/** List all messages for a thread, ordered by creation time (oldest first) */

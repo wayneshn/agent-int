@@ -30,10 +30,12 @@ export const load: PageServerLoad = async (event) => {
 	// Always fetch supporting data in parallel
 	// Note: skill catalog is NOT loaded here — the AgentSkillsPanel component
 	// fetches it lazily when the "Add skill" dialog is opened.
-	const [credsRes, defsRes, llmRes] = await Promise.all([
+	// The agents list powers the collaborators (agent-to-agent) panel.
+	const [credsRes, defsRes, llmRes, agentsRes] = await Promise.all([
 		api('/credentials', event),
 		api('/credentials/definitions', event),
-		api('/llm-providers', event)
+		api('/llm-providers', event),
+		api('/agents', event)
 	]);
 
 	let credentials: CredentialMetadata[] = [];
@@ -52,6 +54,19 @@ export const load: PageServerLoad = async (event) => {
 	if (llmRes.ok) {
 		const body = await llmRes.json();
 		llmConfigs = (body.data ?? []) as LlmProviderConfig[];
+	}
+
+	// Candidate agents for the collaborators panel (the current agent is excluded
+	// client-side in edit mode). Only display metadata is needed here.
+	let agents: Array<{ id: string; name: string; description?: string; avatarUrl?: string }> = [];
+	if (agentsRes.ok) {
+		const body = await agentsRes.json();
+		agents = ((body.data ?? []) as Agent[]).map((a) => ({
+			id: a.id,
+			name: a.name,
+			description: a.description,
+			avatarUrl: a.avatarUrl
+		}));
 	}
 
 	// Edit mode — additionally fetch agent, assigned skills, evolved skills,
@@ -100,6 +115,7 @@ export const load: PageServerLoad = async (event) => {
 		credentials,
 		definitions,
 		llmConfigs,
+		agents,
 		assignedSkillNames,
 		evolvedSkills,
 		knowledgeAssignments
@@ -146,6 +162,7 @@ export const actions: Actions = {
 		const embeddingModelConfigId =
 			(formData.get('embeddingModelConfigId') as string | null) || null;
 		const credentialIds = formData.getAll('credentialIds') as string[];
+		const collaboratorIds = formData.getAll('collaboratorIds') as string[];
 		const allCredentials = formData.get('allCredentials') === 'true';
 		const skillNames = formData.getAll('skillNames') as string[];
 		const knowledgeFileIds = formData.getAll('knowledgeFileIds') as string[];
@@ -167,6 +184,7 @@ export const actions: Actions = {
 					systemInstruction,
 					avatarUrl,
 					credentialIds,
+					collaboratorIds,
 					allCredentials,
 					modelConfigId,
 					embeddingModelConfigId,
@@ -190,6 +208,7 @@ export const actions: Actions = {
 					systemInstruction,
 					avatarUrl,
 					credentialIds,
+					collaboratorIds,
 					allCredentials,
 					modelConfigId,
 					embeddingModelConfigId,

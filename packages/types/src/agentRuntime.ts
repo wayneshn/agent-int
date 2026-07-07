@@ -6,7 +6,7 @@ import type { Workflow, WorkflowTriggerContext } from './workflow.js';
 // ─── Enum mirrors (TypeScript unions matching the pgEnum values) ──────────────
 
 export type AgentThreadStatus = 'idle' | 'running' | 'completed' | 'error';
-export type AgentTriggerType = 'chat' | 'cron' | 'webhook' | 'manual' | 'app';
+export type AgentTriggerType = 'chat' | 'cron' | 'webhook' | 'manual' | 'app' | 'agent';
 /** Valid trigger kinds — 'chat' is not a trigger, only a thread origin */
 export type AgentTriggerKind = 'cron' | 'webhook' | 'manual' | 'app';
 export type AgentMessageRole = 'user' | 'assistant' | 'tool_result';
@@ -43,6 +43,19 @@ export interface AgentThread {
 	 * Pinned threads sort before unpinned ones; within each group ordering is by updatedAt DESC.
 	 */
 	isPinned: boolean;
+	/**
+	 * Agent-to-agent lineage (triggerType === 'agent' threads only).
+	 * initiatorAgentId is the agent that sent the message that spawned this thread;
+	 * parentThreadId is the thread it was running in. Both undefined for all other threads.
+	 */
+	initiatorAgentId?: string;
+	parentThreadId?: string;
+	/**
+	 * Ordered chain of agent IDs from the root turn to this thread's initiator.
+	 * Server-derived; used for delegation depth/cycle enforcement. Undefined for
+	 * non-agent threads.
+	 */
+	delegationChain?: string[];
 	createdAt: Date;
 	updatedAt: Date;
 }
@@ -446,6 +459,21 @@ export interface AgentRuntimeConfig {
 	 */
 	uiRenderingAvailable?: boolean;
 	/**
+	 * Whether the agent-to-agent messaging tools (list_agents, send_to_agent,
+	 * ask_agent) are available for this turn. The backend sets this to `true` only
+	 * when the agent has at least one collaborator in its allow-list. When absent or
+	 * false, agent-runner registers no A2A tools. This is the UX/registration layer —
+	 * the authoritative allow-list + depth/cycle checks run host-side on every call.
+	 */
+	agentMessagingAvailable?: boolean;
+	/**
+	 * Ordered chain of agent IDs from the root human turn down to (and including) the
+	 * initiator of this thread — present only for agent-initiated threads. Carried so
+	 * the target's own A2A calls extend the same chain (the host re-derives and
+	 * re-validates it from the thread row; this copy is informational for the runtime).
+	 */
+	delegationChain?: string[];
+	/**
 	 * Present only for workflow runs (triggerType !== 'chat').
 	 * Contains the full workflow definition (steps, etc.) and the normalized
 	 * trigger context (type, triggerName, firedAt, payload) for the run.
@@ -480,6 +508,72 @@ export interface HitlRequest {
 export interface HitlResponse {
 	/** The human operator's response text */
 	response: string;
+}
+
+// ─── Agent-to-Agent (A2A) Messaging Protocol ──────────────────────────────────
+
+/**
+ * A collaborator agent the current agent is allowed to message — display metadata
+ * only, returned by GET /v1/runtime/internal/agents and surfaced by the list_agents
+ * tool. Contains no secrets or credential info.
+ */
+export interface AgentCollaboratorSummary {
+	id: string;
+	name: string;
+	description?: string;
+}
+
+/**
+ * A2A message request — sent from the agent sandbox to the host to message another
+ * agent it is allowed to talk to. `agentId` from the PROXY_TOKEN is the sender; the
+ * target agent id is a route parameter.
+ */
+export interface AgentMessageRequest {
+	/** The message/instruction to deliver to the target agent */
+	message: string;
+	/**
+	 * Optional brief background from the caller's current task — appended to the
+	 * delivered message so the target has what it needs without the caller's full
+	 * conversation history.
+	 */
+	context?: string;
+}
+
+/** Response from POST /internal/agent/:targetAgentId/message (async hand-off) */
+export interface AgentMessageResult {
+	/** The thread created for the target agent's run — useful for a deep link */
+	threadId: string;
+	/**
+	 * Absolute URL of the target thread in the web app, built host-side from APP_URL.
+	 * Absolute (not root-relative) so the link survives delivery on external channels
+	 * (telegram/discord) where a relative path would be dead.
+	 */
+	threadUrl?: string;
+}
+
+/**
+ * Response from POST /internal/agent/:targetAgentId/ask — the ask is accepted and
+ * the target spawned; the caller polls GET /internal/agent/ask/:threadId for the
+ * outcome. (Polling rather than a held connection: undici's default 5-minute
+ * headersTimeout would kill any longer delegation on a buffered long-poll response.)
+ */
+export interface AgentAskStartResult {
+	/** The target thread to poll for the result */
+	threadId: string;
+}
+
+/** Response from GET /internal/agent/ask/:threadId (poll a pending ask) */
+export type AgentAskPollResult =
+	| { status: 'running' }
+	| { status: 'completed'; response: string; threadId: string }
+	| { status: 'error'; error: string };
+
+/** Final result surfaced by the ask_agent tool once polling settles */
+export interface AgentAskResult {
+	/** The target agent's final text output */
+	response: string;
+	/** The target thread that produced the response */
+	threadId: string;
 }
 
 /** Discriminated union of all SSE events streamed to the browser */
@@ -546,6 +640,19 @@ export type AgentStreamEvent =
 	 * and render a visual indicator that the agent is waiting.
 	 */
 	| { type: 'hitl_request'; prompt: string; options?: string[] }
+	/**
+	 * Emitted on the CALLING agent's thread while a synchronous ask_agent delegation
+	 * is in flight. 'started' fires when the target agent begins working; 'completed'
+	 * or 'error' fires when its run settles. The chat UI shows a "waiting for
+	 * «agent»" indicator between the two.
+	 */
+	| {
+			type: 'agent_delegation';
+			state: 'started' | 'completed' | 'error';
+			targetAgentId: string;
+			targetAgentName: string;
+			targetThreadId: string;
+	  }
 	/**
 	 * Emitted after the 2nd user message when an auto-generated title
 	 * has been saved to the thread. The frontend should update the sidebar.

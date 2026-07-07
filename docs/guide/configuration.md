@@ -70,6 +70,15 @@ node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
 | `AGENT_RUNTIME_TIMEOUT_MS`     | `2400000` (40 min)  | Hard wall-clock limit per agent run, both drivers. Must exceed the 35-minute `ask_human` wait window.                                                                                                                              |
 | `AGENT_RUNTIME_MAX_CONCURRENT` | `20`                | Maximum simultaneous agent runs across all agents.                                                                                                                                                                                 |
 
+### Agent-to-agent messaging
+
+Tune how agents delegate to each other — see [Agent-to-Agent Messaging](/guide/agent-to-agent).
+
+| Variable                       | Default            | Description                                                                                                                                              |
+| ------------------------------ | ------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `AGENT_MESSAGE_MAX_DEPTH`      | `5`                | Maximum delegation chain length — how many times a task may be re-delegated (agent → agent → …) before further delegation is refused. Also bounds fan-out. |
+| `AGENT_MESSAGE_ASK_TIMEOUT_MS` | `1200000` (20 min) | How long a synchronous `ask_agent` call waits for the target agent to finish before returning an error. Kept below `AGENT_RUNTIME_TIMEOUT_MS` so the caller's own run is not killed mid-wait. |
+
 ### Docker driver options
 
 These apply only when `AGENT_RUNTIME_DRIVER=docker`. The compose file presets all of them.

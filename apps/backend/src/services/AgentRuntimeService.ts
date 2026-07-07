@@ -2,6 +2,7 @@ import { rmSync } from 'fs';
 import { resolve, join } from 'path';
 import type {
 	AgentTriggerType,
+	AgentThreadStatus,
 	AgentRuntimeConfig,
 	Agent,
 	ChannelType,
@@ -168,9 +169,20 @@ export class AgentRuntimeService {
 	/**
 	 * Live runtime handles keyed by threadId, for the concurrency cap, shutdown(),
 	 * and cancelTurn() lookup. Only one run per thread is ever live — the
-	 * MessagePipeline concurrency guard rejects a second turn while one is running.
+	 * MessagePipeline concurrency guard rejects a second turn while one is running
+	 * on the chat path, and spawnForThread's own per-thread guard (liveRuns +
+	 * spawningThreads) rejects duplicates on every other path (A2A, triggers).
 	 */
 	private readonly liveRuns = new Map<string, RuntimeHandle>();
+
+	/**
+	 * Threads with a spawn currently in flight but not yet in liveRuns. spawnForThread
+	 * does substantial async work (agent fetch, model resolution, skill
+	 * materialization) before the handle lands in liveRuns and the thread status
+	 * flips to 'running', so DB-status checks alone cannot prevent two concurrent
+	 * spawns for one thread. This set closes that window.
+	 */
+	private readonly spawningThreads = new Set<string>();
 
 	/**
 	 * Threads whose live run was cancelled by the user. Read+cleared in the run's
@@ -178,6 +190,15 @@ export class AgentRuntimeService {
 	 * and suppresses the error SSE toast.
 	 */
 	private readonly cancelledThreads = new Set<string>();
+
+	/**
+	 * Resolvers waiting for a thread's run to reach a terminal state, keyed by
+	 * threadId. Powers awaitThreadCompletion() — the synchronous ask_agent path
+	 * registers a resolver before spawning, and every terminal path of spawnForThread
+	 * (concurrency cap, missing model, spawn failure, onClose) settles them. An array
+	 * so multiple waiters on the same thread are all notified.
+	 */
+	private readonly completionWaiters = new Map<string, Array<(status: AgentThreadStatus) => void>>();
 
 	constructor(
 		private readonly driver: ExecutionDriver,
@@ -264,6 +285,64 @@ export class AgentRuntimeService {
 	}
 
 	/**
+	 * Notify and clear any awaitThreadCompletion() waiters for a thread. Called from
+	 * every terminal path of spawnForThread (the early declines and the onClose
+	 * handler) so a synchronous ask_agent caller is always released — including when
+	 * the run never actually started (concurrency cap, missing model, spawn failure).
+	 * Public so AgentMessagingService can also release waiters when spawnForThread
+	 * THROWS (paths outside its internal decline handling never settle waiters).
+	 */
+	settleWaiters(threadId: string, status: AgentThreadStatus): void {
+		const waiters = this.completionWaiters.get(threadId);
+		if (!waiters) return;
+		this.completionWaiters.delete(threadId);
+		for (const resolve of waiters) {
+			try {
+				resolve(status);
+			} catch (err) {
+				logger.error({ err, threadId }, '[runtime] completion waiter threw');
+			}
+		}
+	}
+
+	/**
+	 * Await the terminal status of a thread's run (for synchronous agent-to-agent
+	 * delegation — ask_agent). Registers a resolver synchronously (so it is in place
+	 * before spawnForThread's onClose can fire), then resolves when the run settles or
+	 * the timeout elapses. A timeout resolves to 'error' — the target run keeps going
+	 * in its own thread, but the caller stops waiting.
+	 *
+	 * MUST be called BEFORE spawnForThread for the same thread so no completion is
+	 * missed. The two are separate calls (rather than a flag on spawnForThread)
+	 * because spawnForThread is shared by all trigger paths, most of which never wait.
+	 */
+	awaitThreadCompletion(threadId: string, timeoutMs: number): Promise<AgentThreadStatus> {
+		return new Promise<AgentThreadStatus>((resolve) => {
+			const timer = setTimeout(() => {
+				// Remove just this resolver, then fire it once with a timeout status.
+				const waiters = this.completionWaiters.get(threadId);
+				if (waiters) {
+					const remaining = waiters.filter((w) => w !== wrapped);
+					if (remaining.length > 0) this.completionWaiters.set(threadId, remaining);
+					else this.completionWaiters.delete(threadId);
+				}
+				logger.warn({ threadId, timeoutMs }, '[runtime] awaitThreadCompletion timed out');
+				resolve('error');
+			}, timeoutMs);
+			timer.unref();
+
+			const wrapped = (status: AgentThreadStatus) => {
+				clearTimeout(timer);
+				resolve(status);
+			};
+
+			const existing = this.completionWaiters.get(threadId) ?? [];
+			existing.push(wrapped);
+			this.completionWaiters.set(threadId, existing);
+		});
+	}
+
+	/**
 	 * One-shot retrieval of a runtime config that was too large to pass inline via
 	 * the RUNTIME_CONFIG env var. Called by the `/internal/config` endpoint when a
 	 * freshly-spawned runtime fetches its config. Returns null (and the caller logs)
@@ -315,6 +394,46 @@ export class AgentRuntimeService {
 		workflowConfig?: WorkflowSpawnConfig,
 		channel?: ChannelType,
 	): Promise<boolean> {
+		// Per-thread duplicate guard — a run is already live or mid-spawn for this
+		// thread. Decline WITHOUT touching thread state, emitting events, or settling
+		// waiters: the in-flight run owns those, and settling here would wrongly
+		// release its ask_agent waiters or mark a healthy run 'error'.
+		if (this.liveRuns.has(threadId) || this.spawningThreads.has(threadId)) {
+			logger.warn(
+				{ agentId, threadId },
+				'[runtime] a run is already live or spawning for this thread — rejecting duplicate spawn',
+			);
+			return false;
+		}
+		this.spawningThreads.add(threadId);
+		try {
+			return await this.spawnForThreadInner(
+				agentId,
+				threadId,
+				ownerId,
+				triggerType,
+				triggerPayload,
+				userDatetime,
+				workflowConfig,
+				channel,
+			);
+		} finally {
+			// By now the run is either in liveRuns (success) or declined/failed —
+			// either way the pre-liveRuns window this set covers is over.
+			this.spawningThreads.delete(threadId);
+		}
+	}
+
+	private async spawnForThreadInner(
+		agentId: string,
+		threadId: string,
+		ownerId: string,
+		triggerType: AgentTriggerType = 'chat',
+		triggerPayload?: Record<string, unknown>,
+		userDatetime?: string,
+		workflowConfig?: WorkflowSpawnConfig,
+		channel?: ChannelType,
+	): Promise<boolean> {
 		// Concurrency cap — reject before touching thread state or spawning.
 		if (this.liveRuns.size >= this.maxConcurrent) {
 			logger.warn(
@@ -327,6 +446,7 @@ export class AgentRuntimeService {
 				message: 'Too many agent runs are in progress. Please try again shortly.',
 			});
 			agentStreamBus.emit(threadId, { type: 'done' });
+			this.settleWaiters(threadId, 'error');
 			return false;
 		}
 
@@ -352,6 +472,7 @@ export class AgentRuntimeService {
 				message: 'This agent has no chat model configured. Please assign a model and try again.',
 			});
 			agentStreamBus.emit(threadId, { type: 'done' });
+			this.settleWaiters(threadId, 'error');
 			return false;
 		}
 
@@ -471,6 +592,7 @@ export class AgentRuntimeService {
 				message: `Failed to start agent runtime: ${spawnErr instanceof Error ? spawnErr.message : String(spawnErr)}`,
 			});
 			agentStreamBus.emit(threadId, { type: 'done' });
+			this.settleWaiters(threadId, 'error');
 			return false;
 		}
 		this.liveRuns.set(threadId, handle);
@@ -554,6 +676,8 @@ export class AgentRuntimeService {
 			}
 			// Always emit 'done' so the SSE subscriber can clean up
 			agentStreamBus.emit(threadId, { type: 'done' });
+			// Release any synchronous ask_agent caller waiting on this thread's result.
+			this.settleWaiters(threadId, status);
 		});
 
 		handle.onError((err) => {
@@ -722,6 +846,23 @@ export class AgentRuntimeService {
 			}
 		}
 
+		// A2A delegation chain — carried from the thread row (set by AgentMessagingService
+		// for agent-initiated threads). Informational for the runtime; the host re-derives
+		// and re-validates it from the thread on every A2A call. A lookup failure is
+		// non-fatal — the chain only affects the runtime's own awareness.
+		let delegationChain: string[] | undefined;
+		try {
+			const thread = await this.sessionService.getThreadByIdInternal(threadId);
+			if (thread?.delegationChain && thread.delegationChain.length > 0) {
+				delegationChain = thread.delegationChain;
+			}
+		} catch (err) {
+			logger.warn(
+				{ threadId, err },
+				'[runtime] failed to load delegation chain for runtime config',
+			);
+		}
+
 		// Knowledge base summary — file names only, for the system-prompt note that
 		// tells the agent its knowledge is retrievable via memory_search. A lookup
 		// failure must never block a run.
@@ -774,6 +915,11 @@ export class AgentRuntimeService {
 			// coming from the web channel — external channels (telegram/discord) and
 			// cron/webhook/workflow runs cannot display interactive UI and stay text-only.
 			uiRenderingAvailable: triggerType === 'chat' && channel === 'web',
+			// Agent-to-agent tools are offered only when the agent has at least one
+			// collaborator in its allow-list. The authoritative allow-list + depth/cycle
+			// checks run host-side on every A2A call (AgentMessagingService).
+			agentMessagingAvailable: agent.collaboratorIds.length > 0,
+			...(delegationChain !== undefined ? { delegationChain } : {}),
 			// Workflow config — present only for workflow runs. Causes the runtime to route
 			// to workflow-runner.ts rather than agent-runner.ts.
 			...(workflowConfig !== undefined

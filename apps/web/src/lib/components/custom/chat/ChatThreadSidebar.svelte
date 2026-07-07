@@ -87,8 +87,15 @@
 	 * Within each group (pinned / unpinned) threads are ordered by updatedAt DESC.
 	 * Workflow-thread filter is applied before the sort.
 	 */
+	/**
+	 * Background threads are those not started by the user directly in chat — workflow
+	 * runs and agent-to-agent messages. Both are hidden behind the same toggle.
+	 */
+	const isBackgroundThread = (t: (typeof threads)[number]) =>
+		t.isWorkflowThread || t.triggerType === 'agent';
+
 	let filteredThreads = $derived(() => {
-		const base = showWorkflowThreads ? [...threads] : threads.filter((t) => !t.isWorkflowThread);
+		const base = showWorkflowThreads ? [...threads] : threads.filter((t) => !isBackgroundThread(t));
 
 		const pinned = base
 			.filter((t) => t.isPinned)
@@ -101,8 +108,8 @@
 		return [...pinned, ...unpinned];
 	});
 
-	/** Whether there are any workflow threads at all (used to show the toggle) */
-	let hasWorkflowThreads = $derived(threads.some((t) => t.isWorkflowThread));
+	/** Whether there are any background (workflow / agent-to-agent) threads (shows the toggle) */
+	let hasWorkflowThreads = $derived(threads.some((t) => isBackgroundThread(t)));
 
 	/** Desktop sidebar open state */
 	let desktopOpen = $state(true);
@@ -295,6 +302,12 @@
 											class="rounded bg-muted px-1 py-px text-[9px] font-medium text-muted-foreground"
 										>
 											workflow
+										</span>
+									{:else if thread.triggerType === 'agent'}
+										<span
+											class="rounded bg-muted px-1 py-px text-[9px] font-medium text-muted-foreground"
+										>
+											from agent
 										</span>
 									{/if}
 								</span>

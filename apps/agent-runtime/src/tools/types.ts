@@ -49,6 +49,13 @@ export interface ToolContext {
 	 * cron/webhook/workflow runs stay text-only.
 	 */
 	uiRenderingAvailable?: boolean;
+	/**
+	 * Whether the agent-to-agent tools (list_agents, send_to_agent, ask_agent) should
+	 * be registered for this turn. Set from AgentRuntimeConfig.agentMessagingAvailable —
+	 * true only when the agent has at least one collaborator in its allow-list. The
+	 * backend independently enforces the allow-list + depth/cycle checks on every call.
+	 */
+	agentMessagingAvailable?: boolean;
 }
 
 /**

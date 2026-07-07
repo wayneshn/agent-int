@@ -96,6 +96,8 @@ export async function runAgent(
 		// Register render_ui only for web-channel chat turns — external channels
 		// can't display interactive UI and must get plain text.
 		uiRenderingAvailable: config.uiRenderingAvailable ?? false,
+		// Register agent-to-agent tools only when the agent has collaborators.
+		agentMessagingAvailable: config.agentMessagingAvailable ?? false,
 	});
 
 	// ── streamFn: routes every LLM call through the host proxy ────────────────

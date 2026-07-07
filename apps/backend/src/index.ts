@@ -44,6 +44,7 @@ import { agentStreamBus } from './services/AgentStreamBus.js';
 import { AgentProxyService } from './services/AgentProxyService.js';
 import { AgentLlmProxyService } from './services/AgentLlmProxyService.js';
 import { AgentRuntimeService } from './services/AgentRuntimeService.js';
+import { AgentMessagingService } from './services/AgentMessagingService.js';
 import { BrowserService } from './services/BrowserService.js';
 import { ChatFileService } from './services/ChatFileService.js';
 import { ProcessDriver } from './services/runtime/ProcessDriver.js';
@@ -154,6 +155,14 @@ const runtimeService = new AgentRuntimeService(
 	workflowRunService,
 	browserService,
 	chatFileService,
+);
+
+// Agent-to-agent messaging — authorizes an agent messaging another (collaborator
+// allow-list + delegation depth/cycle guards) and spawns the target via runtimeService.
+const agentMessagingService = new AgentMessagingService(
+	agentService,
+	sessionService,
+	runtimeService,
 );
 
 // --- Instantiate channel services ---
@@ -343,6 +352,7 @@ app.use(
 		skillService,
 		browserService,
 		chatFileService,
+		agentMessagingService,
 	),
 );
 

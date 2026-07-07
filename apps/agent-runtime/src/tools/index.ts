@@ -15,6 +15,9 @@ import { createReadWorkflowTool } from './read-workflow.js';
 import { createTriggerWorkflowTool } from './trigger-workflow.js';
 import { createCreateWorkflowTool } from './create-workflow.js';
 import { createChessEngineTool } from './chess-engine.js';
+import { createListAgentsTool } from './list-agents.js';
+import { createSendToAgentTool } from './send-to-agent.js';
+import { createAskAgentTool } from './ask-agent.js';
 import { createBrowserTools } from './browser.js';
 import { createRenderUiTool } from './render-ui.js';
 
@@ -46,6 +49,10 @@ export { resolveWorkspacePath } from './types.js';
  * The render_ui tool (OpenUI generative UI) is included ONLY when
  * ctx.uiRenderingAvailable is true — chat turns from the web channel. External
  * channels (telegram/discord) and workflow runs stay text-only by omission.
+ *
+ * The agent-to-agent tools (list_agents, send_to_agent, ask_agent) are included ONLY
+ * when ctx.agentMessagingAvailable is true — i.e. the agent has at least one
+ * collaborator in its allow-list. The host re-checks the allow-list on every call.
  */
 export function createAgentTools(ctx: Parameters<typeof createCallApiTool>[0]): AgentTool[] {
 	const tools = [
@@ -66,6 +73,9 @@ export function createAgentTools(ctx: Parameters<typeof createCallApiTool>[0]): 
 		createCreateWorkflowTool(ctx),
 		createChessEngineTool(ctx),
 	];
+	if (ctx.agentMessagingAvailable) {
+		tools.push(createListAgentsTool(ctx), createSendToAgentTool(ctx), createAskAgentTool(ctx));
+	}
 	if (ctx.browserAvailable) {
 		tools.push(...createBrowserTools(ctx));
 	}

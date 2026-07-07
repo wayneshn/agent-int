@@ -75,6 +75,12 @@
 				return 'Webhook';
 			case 'manual':
 				return 'Manual';
+			case 'app':
+				return 'App';
+			case 'agent':
+				return 'Agent';
+			default:
+				return 'Run';
 		}
 	}
 

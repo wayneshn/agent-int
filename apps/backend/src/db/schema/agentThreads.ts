@@ -26,6 +26,7 @@ export const agentThreadStatusEnum = pgEnum('agent_thread_status', [
  * 'webhook' = external webhook trigger
  * 'manual' = user clicked "run now"
  * 'app' = an app-trigger provider event fired (Gmail/Notion/Slack/Google Forms/…)
+ * 'agent' = another agent messaged this agent (agent-to-agent delegation)
  */
 export const agentTriggerTypeEnum = pgEnum('agent_trigger_type', [
 	'chat',
@@ -33,6 +34,7 @@ export const agentTriggerTypeEnum = pgEnum('agent_trigger_type', [
 	'webhook',
 	'manual',
 	'app',
+	'agent',
 ]);
 
 /**
@@ -86,6 +88,21 @@ export const agentThreads = pgTable(
 		 * within each group (pinned and unpinned sorted by updatedAt DESC separately).
 		 */
 		isPinned: boolean('is_pinned').notNull().default(false),
+		/**
+		 * Agent-to-agent lineage — set only for threads created by the A2A messaging
+		 * tools (triggerType = 'agent'). Null for all human/trigger/workflow threads.
+		 */
+		/** The agent that sent the message which spawned this thread */
+		initiatorAgentId: uuid('initiator_agent_id'),
+		/** The thread the initiating agent was running in when it sent the message */
+		parentThreadId: uuid('parent_thread_id'),
+		/**
+		 * Ordered chain of agent IDs from the root human-initiated turn down to (and
+		 * including) the initiator of this thread. Used server-side to enforce the
+		 * delegation depth cap and detect cycles — it is derived from the parent
+		 * thread's chain, never supplied by the sandbox, so it cannot be spoofed.
+		 */
+		delegationChain: jsonb('delegation_chain'),
 		createdAt: timestamp('created_at').defaultNow().notNull(),
 		updatedAt: timestamp('updated_at').defaultNow().notNull(),
 	},
@@ -93,5 +110,6 @@ export const agentThreads = pgTable(
 		index('agent_threads_agent_id_idx').on(table.agentId),
 		index('agent_threads_owner_id_idx').on(table.ownerId),
 		index('agent_threads_trigger_id_idx').on(table.triggerId),
+		index('agent_threads_initiator_agent_id_idx').on(table.initiatorAgentId),
 	],
 );

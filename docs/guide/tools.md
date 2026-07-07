@@ -62,6 +62,16 @@ Agents can inspect and operate their own [workflows](/guide/workflows/):
 | `trigger_workflow` | Starts a workflow run (fire-and-forget; returns the run ID and a link to the run page).                                                                       |
 | `create_workflow`  | Creates a new workflow. The agent is required to present the full configuration to you via `ask_human` and get explicit confirmation **before** calling this. |
 
+## Agent collaboration
+
+These exist only when the agent has collaborators in its allow-list — see [Agent-to-Agent Messaging](/guide/agent-to-agent).
+
+| Tool             | What it does                                                                                              |
+| ---------------- | -------------------------------------------------------------------------------------------------------- |
+| `list_agents`    | Lists the agents this agent is allowed to message.                                                       |
+| `ask_agent`      | Delegates to another agent and waits for its reply, which comes back as the tool result.                 |
+| `send_to_agent`  | Hands a message to another agent without waiting (fire-and-forget; returns a link to the conversation).  |
+
 ## Per-turn limits
 
 An agent may make at most **20 tool calls in a single turn**. On hitting the cap, the tool call is blocked and the agent must reply with text — so a runaway loop ends with an explanation rather than silence.

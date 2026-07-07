@@ -50,6 +50,7 @@ export default defineConfig({
 						{ text: 'Skills', link: '/guide/skills' },
 						{ text: 'Knowledge Base', link: '/guide/knowledge-base' },
 						{ text: 'Agent Memory', link: '/guide/memory' },
+						{ text: 'Agent-to-Agent Messaging', link: '/guide/agent-to-agent' },
 						{
 							text: 'Workflows',
 							collapsed: true,

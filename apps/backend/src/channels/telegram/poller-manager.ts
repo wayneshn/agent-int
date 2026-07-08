@@ -71,6 +71,14 @@ export class TelegramPollerManager {
 	}
 
 	/**
+	 * The running adapter for a bot credential, for proactive outbound sends
+	 * (OutboundDeliveryService). Undefined when no poller is active for it.
+	 */
+	getAdapter(credentialId: string): TelegramAdapter | undefined {
+		return this.adapters.get(credentialId);
+	}
+
+	/**
 	 * Stop the poller for a given credentialId.
 	 * Called when the bot credential is deleted, or when the last channel link
 	 * using the credential is removed. No-op if nothing is running for it.

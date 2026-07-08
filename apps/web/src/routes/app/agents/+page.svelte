@@ -15,6 +15,7 @@
 	import BotIcon from '@lucide/svelte/icons/bot';
 	import ZapIcon from '@lucide/svelte/icons/zap';
 	import BrainIcon from '@lucide/svelte/icons/brain';
+	import TargetIcon from '@lucide/svelte/icons/target';
 	import type { PageData } from './$types';
 	import type { Agent, CredentialMetadata } from '@repo/types';
 
@@ -229,6 +230,18 @@
 								>
 									<ZapIcon class="size-4" />
 									<span class="sr-only">Workflows for {agent.name}</span>
+								</Button>
+
+								<!-- Missions -->
+								<Button
+									variant="ghost"
+									size="sm"
+									onclick={() => goto(`/app/agents/${agent.id}/missions`)}
+									class="text-muted-foreground hover:text-foreground"
+									title="Manage missions"
+								>
+									<TargetIcon class="size-4" />
+									<span class="sr-only">Missions for {agent.name}</span>
 								</Button>
 
 								<!-- Run history -->

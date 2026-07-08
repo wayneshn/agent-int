@@ -2,7 +2,7 @@
 	import { page } from '$app/state';
 	import { activeBreadcrumbThreadTitle } from '$lib/stores/breadcrumb.store.js';
 	import * as Breadcrumb from '$lib/components/ui/breadcrumb/index.js';
-	import type { Agent, Workflow } from '@repo/types';
+	import type { Agent, AgentMission, Workflow } from '@repo/types';
 
 	/**
 	 * A breadcrumb item — either a link (with href) or the current page (no href).
@@ -27,6 +27,10 @@
 		// Access dynamic entity names from merged page data
 		const agent = (page.data as Record<string, unknown>).agent as Agent | null | undefined;
 		const workflow = (page.data as Record<string, unknown>).workflow as Workflow | null | undefined;
+		const mission = (page.data as Record<string, unknown>).mission as
+			| AgentMission
+			| null
+			| undefined;
 
 		// ── /app ──────────────────────────────────────────────────────────────────
 		if (pathname === '/app') {
@@ -151,6 +155,45 @@
 				{ label: agentName, href: `/app/agents/new?id=${agentId}&editmode=true` },
 				{ label: 'Workflows', href: `/app/workflows?agentId=${agentId}` },
 				{ label: 'New Workflow' }
+			];
+		}
+
+		// ── /app/agents/[id]/missions/new (create or edit mode) ──────────────────
+		const missionBuilderMatch = pathname.match(/^\/app\/agents\/([^/]+)\/missions\/new$/);
+		if (missionBuilderMatch) {
+			const agentId = missionBuilderMatch[1];
+			const agentName = agent?.name ?? 'Agent';
+			const isEditMode = !!searchParams.get('id');
+			return [
+				{ label: 'Agents', href: '/app/agents' },
+				{ label: agentName, href: `/app/agents/new?id=${agentId}&editmode=true` },
+				{ label: 'Missions', href: `/app/agents/${agentId}/missions` },
+				{ label: isEditMode && mission ? mission.title : 'New Mission' }
+			];
+		}
+
+		// ── /app/agents/[id]/missions/[missionId] ─────────────────────────────────
+		const missionDetailMatch = pathname.match(/^\/app\/agents\/([^/]+)\/missions\/([^/]+)$/);
+		if (missionDetailMatch) {
+			const agentId = missionDetailMatch[1];
+			const agentName = agent?.name ?? 'Agent';
+			return [
+				{ label: 'Agents', href: '/app/agents' },
+				{ label: agentName, href: `/app/agents/new?id=${agentId}&editmode=true` },
+				{ label: 'Missions', href: `/app/agents/${agentId}/missions` },
+				{ label: mission?.title ?? 'Mission' }
+			];
+		}
+
+		// ── /app/agents/[id]/missions ─────────────────────────────────────────────
+		const missionsListMatch = pathname.match(/^\/app\/agents\/([^/]+)\/missions$/);
+		if (missionsListMatch) {
+			const agentId = missionsListMatch[1];
+			const agentName = agent?.name ?? 'Agent';
+			return [
+				{ label: 'Agents', href: '/app/agents' },
+				{ label: agentName, href: `/app/agents/new?id=${agentId}&editmode=true` },
+				{ label: 'Missions' }
 			];
 		}
 

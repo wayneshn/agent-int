@@ -27,6 +27,7 @@ export const agentThreadStatusEnum = pgEnum('agent_thread_status', [
  * 'manual' = user clicked "run now"
  * 'app' = an app-trigger provider event fired (Gmail/Notion/Slack/Google Forms/…)
  * 'agent' = another agent messaged this agent (agent-to-agent delegation)
+ * 'mission' = the mission scheduler woke the agent for an autonomous mission turn
  */
 export const agentTriggerTypeEnum = pgEnum('agent_trigger_type', [
 	'chat',
@@ -35,6 +36,7 @@ export const agentTriggerTypeEnum = pgEnum('agent_trigger_type', [
 	'manual',
 	'app',
 	'agent',
+	'mission',
 ]);
 
 /**
@@ -103,6 +105,14 @@ export const agentThreads = pgTable(
 		 * thread's chain, never supplied by the sandbox, so it cannot be spoofed.
 		 */
 		delegationChain: jsonb('delegation_chain'),
+		/**
+		 * The mission this thread belongs to (triggerType = 'mission' wake threads).
+		 * Plain uuid — no FK reference to agent_missions to avoid a circular import
+		 * (agent_missions.current_thread_id already references this table). Chat
+		 * messages sent to a thread carrying a missionId run with mission context
+		 * and tools attached (owner steering). Null for all other threads.
+		 */
+		missionId: uuid('mission_id'),
 		createdAt: timestamp('created_at').defaultNow().notNull(),
 		updatedAt: timestamp('updated_at').defaultNow().notNull(),
 	},
@@ -111,5 +121,6 @@ export const agentThreads = pgTable(
 		index('agent_threads_owner_id_idx').on(table.ownerId),
 		index('agent_threads_trigger_id_idx').on(table.triggerId),
 		index('agent_threads_initiator_agent_id_idx').on(table.initiatorAgentId),
+		index('agent_threads_mission_id_idx').on(table.missionId),
 	],
 );

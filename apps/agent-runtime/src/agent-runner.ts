@@ -16,7 +16,7 @@ import type { AgentRuntimeConfig, LlmProxyRequest } from '@repo/types';
 import { logger, resolveProviderApi } from '@repo/utils';
 import { ProxyClient } from './proxy-client.js';
 import { createAgentTools } from './tools/index.js';
-import { buildSkillsPromptSection } from './prompt-sections.js';
+import { buildSkillsPromptSection, buildMissionPromptSection } from './prompt-sections.js';
 import { recordSkillTraces, type ToolLogEntry } from './skill-trace.js';
 
 /** Zero-value Usage for the placeholder AssistantMessage returned by the proxy streamFn */
@@ -98,6 +98,14 @@ export async function runAgent(
 		uiRenderingAvailable: config.uiRenderingAvailable ?? false,
 		// Register agent-to-agent tools only when the agent has collaborators.
 		agentMessagingAvailable: config.agentMessagingAvailable ?? false,
+		// Register mission tools when this turn belongs to a mission (autonomous
+		// wake or owner steering chat). ask_human is skipped on autonomous wakes
+		// (missionWake) — nobody is watching; request_approval is the async path.
+		missionAvailable: !!config.mission,
+		missionWake: config.triggerType === 'mission',
+		// Register the mission MANAGEMENT tools (create/list/control) on interactive
+		// chat turns — a human is present to confirm autonomous spend. Not on wakes.
+		missionManagementAvailable: config.triggerType === 'chat',
 	});
 
 	// ── streamFn: routes every LLM call through the host proxy ────────────────
@@ -227,6 +235,24 @@ export async function runAgent(
 		};
 		return toolResultMsg;
 	});
+
+	// Provider-compatibility guard: some providers (notably Google Gemini) reject a
+	// history whose FIRST turn is an assistant/model turn — a functionCall turn must
+	// follow a user or function-response turn. Mission wake threads and A2A ('agent')
+	// threads begin with an assistant message: their trigger prompt is delivered
+	// in-memory via agent.prompt() and never persisted, so the first persisted row is
+	// an assistant (often a tool call). A later chat turn on such a thread would send
+	// an assistant-first history → 400 "function call turn must come immediately after
+	// a user turn or after a function response turn." Prepend a neutral leading user
+	// turn (in-memory only — never persisted, never shown) to keep the sequence valid.
+	if (agentMessages.length > 0 && agentMessages[0].role !== 'user') {
+		const leadIn: UserMessage = {
+			role: 'user',
+			content: [{ type: 'text', text: '(Continuing this session.)' } as TextContent],
+			timestamp: agentMessages[0].timestamp,
+		};
+		agentMessages.unshift(leadIn);
+	}
 
 	// ── Build effective system prompt ─────────────────────────────────────────
 
@@ -446,6 +472,32 @@ export async function runAgent(
 		}
 	}
 
+	// Mission context — the mission's entire cross-wake continuity (goal, plan
+	// document, journal, budget, approval decisions) is injected here because
+	// every wake runs in a fresh thread.
+	if (config.mission) {
+		effectiveSystemPrompt += buildMissionPromptSection(
+			config.mission,
+			config.missionChatMode ?? false,
+		);
+	}
+
+	// Mission management awareness — only on interactive chat turns (where the
+	// management tools are registered). Tells the agent the capability exists.
+	if (config.triggerType === 'chat') {
+		effectiveSystemPrompt +=
+			`\n\n## Missions (autonomous long-term goals)\n` +
+			`You can run MISSIONS — long-term goals you pursue autonomously over days/weeks, waking ` +
+			`yourself on a schedule to plan, act, and report, spending up to a budget the user sets. ` +
+			`Manage them with list_missions, read_mission, create_mission, update_mission, and ` +
+			`control_mission (activate/pause/complete/wake).\n` +
+			`- When the user asks for ongoing/autonomous work ("keep promoting X", "monitor Y and ` +
+			`report", "run this every day"), offer to set up a mission.\n` +
+			`- Before create_mission, CONFIRM the goal and the total USD budget with the user — the ` +
+			`budget is a real spending cap. Create as a draft unless they explicitly say start now.\n` +
+			`- One-off tasks you can do right now do NOT need a mission; just do them.`;
+	}
+
 	// ── Tool restrictions (workspace boundary + no host exploration) ──────────
 	// These rules apply to all agents regardless of other configuration.
 	// They constrain run_terminal and run_code to the agent workspace, prevent
@@ -651,7 +703,13 @@ export async function runAgent(
 	let turnSucceeded = false;
 	try {
 		if (config.triggerType !== 'chat' && config.triggerPayload && agentMessages.length === 0) {
-			const triggerText = `Trigger type: ${config.triggerType}\nPayload:\n${JSON.stringify(config.triggerPayload, null, 2)}`;
+			// Mission wakes get a purpose-built prompt — the raw payload dump reads
+			// like machine input and the mission section already carries the context.
+			const triggerText =
+				config.triggerType === 'mission' && config.mission
+					? `Mission wake ${config.mission.wakeNumber} (${String(config.triggerPayload.reason ?? 'scheduled')}). ` +
+						`Review your mission context in the system prompt and make progress on the goal now.`
+					: `Trigger type: ${config.triggerType}\nPayload:\n${JSON.stringify(config.triggerPayload, null, 2)}`;
 			logger.info(
 				{ triggerType: config.triggerType },
 				'[agent-runner] starting via trigger prompt',
@@ -668,6 +726,32 @@ export async function runAgent(
 		// (terminate:true was returned), so this triggers exactly one additional LLM
 		// call that generates an honest answer for the user.
 		await agent.waitForIdle();
+
+		// ── Mission wake conclusion backstop ─────────────────────────────────────
+		// An autonomous wake must always leave a readable record. If the model ended
+		// the wake without logging a summary (e.g. it stopped right after run_code or
+		// schedule_next_wake), force ONE follow-up turn to write the mission_log
+		// summary + a closing note. Skipped when it already logged or completed the
+		// mission, and only for autonomous wakes (steering chats are triggerType 'chat').
+		if (config.triggerType === 'mission' && config.mission) {
+			const wroteSummary = toolLog.some(
+				(t) => t.name === 'mission_log' || t.name === 'mission_complete',
+			);
+			if (!wroteSummary) {
+				logger.info(
+					{ threadId: config.threadId },
+					'[agent-runner] mission wake produced no summary — forcing conclusion',
+				);
+				await agent.prompt(
+					'Before this wake ends: call mission_log ONCE with a concise summary of what you ' +
+						'did this wake, what you found or accomplished, and what remains for next time. ' +
+						'If you have not scheduled your next wake yet, call schedule_next_wake now. ' +
+						'Then reply with a one-line closing note. Do not start new work.',
+				);
+				await agent.waitForIdle();
+			}
+		}
+
 		turnSucceeded = true;
 	} finally {
 		// Awaited (not fire-and-forget) — the process exits right after this

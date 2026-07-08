@@ -2,11 +2,12 @@ import type { ApiResponse } from './api.js';
 import type { SkillRuntimeEntry } from './skill.js';
 import type { ChatFile } from './chatFile.js';
 import type { Workflow, WorkflowTriggerContext } from './workflow.js';
+import type { MissionRuntimeInfo, MissionEvent } from './mission.js';
 
 // ─── Enum mirrors (TypeScript unions matching the pgEnum values) ──────────────
 
 export type AgentThreadStatus = 'idle' | 'running' | 'completed' | 'error';
-export type AgentTriggerType = 'chat' | 'cron' | 'webhook' | 'manual' | 'app' | 'agent';
+export type AgentTriggerType = 'chat' | 'cron' | 'webhook' | 'manual' | 'app' | 'agent' | 'mission';
 /** Valid trigger kinds — 'chat' is not a trigger, only a thread origin */
 export type AgentTriggerKind = 'cron' | 'webhook' | 'manual' | 'app';
 export type AgentMessageRole = 'user' | 'assistant' | 'tool_result';
@@ -56,6 +57,12 @@ export interface AgentThread {
 	 * non-agent threads.
 	 */
 	delegationChain?: string[];
+	/**
+	 * The mission this thread belongs to (triggerType 'mission' wake threads).
+	 * Chat messages sent to a thread carrying a missionId run with mission context
+	 * and tools attached (owner steering). Undefined for all other threads.
+	 */
+	missionId?: string;
 	createdAt: Date;
 	updatedAt: Date;
 }
@@ -350,6 +357,12 @@ export interface SandboxTokenPayload {
 	 * agent_credentials junction. Set for agents flagged with `allCredentials`.
 	 */
 	allCredentials?: boolean;
+	/**
+	 * Present when this turn belongs to a mission (autonomous wake OR owner steering
+	 * chat on a mission thread). Authorizes the /internal/mission/* endpoints and
+	 * attributes LLM cost to the mission's budget. Never taken from a request body.
+	 */
+	missionId?: string;
 	iat: number;
 	exp: number;
 }
@@ -484,6 +497,20 @@ export interface AgentRuntimeConfig {
 		definition: Workflow;
 		triggerContext: WorkflowTriggerContext;
 	};
+	/**
+	 * Present when this turn belongs to a mission — either an autonomous wake
+	 * (triggerType 'mission') or an owner steering chat on a mission thread
+	 * (triggerType 'chat' + missionChatMode). Gates the mission_* tools and
+	 * feeds the mission prompt section (goal, plan document, budget, journal).
+	 */
+	mission?: MissionRuntimeInfo;
+	/**
+	 * True when this is an interactive chat turn on a mission thread (the owner
+	 * steering the mission between wakes). Mission tools stay available and the
+	 * prompt tells the agent to persist owner instructions into its plan document;
+	 * ask_human remains registered (a human IS present, unlike autonomous wakes).
+	 */
+	missionChatMode?: boolean;
 }
 
 // ─── SSE Event types (host → browser) ────────────────────────────────────────
@@ -658,6 +685,13 @@ export type AgentStreamEvent =
 	 * has been saved to the thread. The frontend should update the sidebar.
 	 */
 	| { type: 'thread_title_updated'; threadId: string; title: string }
+	/**
+	 * Emitted on the AgentStreamBus keyed by MISSION id (not thread id) whenever a
+	 * mission journal entry is appended. Powers live updates on the mission detail
+	 * page. Never reaches chat/thread subscribers — mission events only emit on
+	 * missionId keys, which never collide with threadId keys.
+	 */
+	| { type: 'mission_event'; missionId: string; event: MissionEvent }
 	| { type: 'error'; message: string }
 	| { type: 'done' };
 

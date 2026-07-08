@@ -68,6 +68,9 @@ export class AgentProxyService {
 			// Without this, an allCredentials agent's token loses the flag and the proxy
 			// falls back to the junction check — denying any owner credential not linked.
 			allCredentials: payload.allCredentials,
+			// Scopes the /internal/mission/* endpoints and attributes LLM cost to the
+			// mission budget. Absent for non-mission turns.
+			missionId: payload.missionId,
 		})
 			.setProtectedHeader({ alg: 'HS256' })
 			.setIssuedAt()

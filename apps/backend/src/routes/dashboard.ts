@@ -5,7 +5,12 @@ import { logger } from '../config/logger.js';
 import type { AuthService } from '../services/AuthService.js';
 import type { AgentSessionService } from '../services/AgentSessionService.js';
 import type { WorkflowRunService } from '../services/WorkflowRunService.js';
-import type { ActivityItem, DashboardActivityResponse } from '@repo/types';
+import type { MissionService } from '../services/MissionService.js';
+import type {
+	ActivityItem,
+	DashboardActivityResponse,
+	DashboardMissionsResponse,
+} from '@repo/types';
 
 /**
  * Factory — dashboard aggregation routes.
@@ -18,11 +23,14 @@ import type { ActivityItem, DashboardActivityResponse } from '@repo/types';
  *     Owner-scoped "recent activity" feed = recent interactive chat threads +
  *     recent workflow runs across all the owner's agents, merged and sorted by
  *     recency (newest first).
+ *   GET /v1/dashboard/missions
+ *     Owner-scoped mission summary = active mission count + pending approvals.
  */
 export function createDashboardRouter(
 	authService: AuthService,
 	sessionService: AgentSessionService,
 	workflowRunService: WorkflowRunService,
+	missionService: MissionService,
 ): Router {
 	const router = Router();
 	const auth = requireAuth(authService);
@@ -79,6 +87,30 @@ export function createDashboardRouter(
 		} catch (err) {
 			logger.error({ err, ownerId }, 'Failed to load dashboard activity');
 			const body: DashboardActivityResponse = { success: false, error: 'Failed to load activity' };
+			res.status(500).json(body);
+		}
+	});
+
+	router.get('/missions', auth, async (req: Request, res: Response) => {
+		const ownerId = req.user?.sub;
+		if (!ownerId) {
+			const body: DashboardMissionsResponse = { success: false, error: 'Unauthorized' };
+			res.status(401).json(body);
+			return;
+		}
+		try {
+			const [activeCount, pendingApprovals] = await Promise.all([
+				missionService.countActiveByOwner(ownerId),
+				missionService.listPendingApprovalsByOwner(ownerId, 8),
+			]);
+			const body: DashboardMissionsResponse = {
+				success: true,
+				data: { activeCount, pendingApprovals },
+			};
+			res.json(body);
+		} catch (err) {
+			logger.error({ err, ownerId }, 'Failed to load dashboard missions');
+			const body: DashboardMissionsResponse = { success: false, error: 'Failed to load missions' };
 			res.status(500).json(body);
 		}
 	});

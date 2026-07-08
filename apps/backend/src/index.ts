@@ -59,6 +59,12 @@ import { SkillService } from './services/SkillService.js';
 import { SkillInstallService } from './services/SkillInstallService.js';
 import { SkillMaterializerService } from './services/SkillMaterializerService.js';
 import { SkillEvolutionService } from './services/SkillEvolutionService.js';
+import { MissionService } from './services/MissionService.js';
+import { MissionSchedulerService } from './services/MissionSchedulerService.js';
+import { NotificationService } from './services/NotificationService.js';
+import { OutboundDeliveryService } from './services/OutboundDeliveryService.js';
+import { createMissionsRouter } from './routes/missions.js';
+import { createNotificationsRouter } from './routes/notifications.js';
 
 // Prefer IPv4 for all outbound connections (fetch/undici, ws). Node's fetch does
 // not fall back to IPv4 when an IPv6 connect hangs (no Happy Eyeballs), so flaky
@@ -92,6 +98,10 @@ const agentMemoryService = new AgentMemoryService(
 );
 const sessionService = new AgentSessionService();
 const proxyService = new AgentProxyService(credentialResolverService, PROXY_TOKEN_SECRET);
+// Mission persistence + budget accounting. Constructed early because both the
+// LLM proxy (cost attribution + budget backstop) and the runtime service
+// (mission context for wakes and owner steering chats) depend on it.
+const missionService = new MissionService();
 const llmProxyService = new AgentLlmProxyService(
 	proxyService,
 	agentService,
@@ -100,6 +110,7 @@ const llmProxyService = new AgentLlmProxyService(
 	agentStreamBus,
 	sessionService,
 	agentMemoryService,
+	missionService,
 );
 // --- Instantiate skill services ---
 // SkillService: merged catalog (builtin + installed) and assignment management.
@@ -155,6 +166,7 @@ const runtimeService = new AgentRuntimeService(
 	workflowRunService,
 	browserService,
 	chatFileService,
+	missionService,
 );
 
 // Agent-to-agent messaging — authorizes an agent messaging another (collaborator
@@ -205,6 +217,25 @@ const discordGatewayManager = new DiscordGatewayManager(
 	sessionService,
 	messagePipeline,
 	chatFileService,
+);
+
+// --- Instantiate mission delivery + scheduler ---
+// OutboundDeliveryService: proactive pushes to the owner (in-app notification row
+// always; Telegram/Discord best-effort via the channel managers' running adapters).
+// MissionSchedulerService: the autonomous wake loop (DB next_wake_at + 30s sweep).
+const notificationService = new NotificationService();
+const outboundDeliveryService = new OutboundDeliveryService(
+	notificationService,
+	channelService,
+	telegramPollerManager,
+	discordGatewayManager,
+);
+const missionSchedulerService = new MissionSchedulerService(
+	missionService,
+	runtimeService,
+	sessionService,
+	outboundDeliveryService,
+	llmProxyService,
 );
 
 // --- Instantiate workflow services ---
@@ -309,7 +340,10 @@ app.use('/v1/users', createUsersRouter(authService));
 app.use('/v1/api-keys', createApiKeysRouter(authService));
 app.use('/v1/iam', createIamRouter(authService));
 app.use('/v1/agents', createAgentsRouter(authService, skillService));
-app.use('/v1/dashboard', createDashboardRouter(authService, sessionService, workflowRunService));
+app.use(
+	'/v1/dashboard',
+	createDashboardRouter(authService, sessionService, workflowRunService, missionService),
+);
 app.use('/v1/skills', createSkillsRouter(authService, skillService, skillInstallService));
 
 // Knowledge library routes — user-level files + cloud provider browsing
@@ -353,6 +387,9 @@ app.use(
 		browserService,
 		chatFileService,
 		agentMessagingService,
+		missionService,
+		outboundDeliveryService,
+		missionSchedulerService,
 	),
 );
 
@@ -383,6 +420,15 @@ app.use(
 		appTriggerManager,
 	),
 );
+
+// Mission routes — autonomous long-term goals, scoped under agents (mergeParams)
+app.use(
+	'/v1/agents/:agentId/missions',
+	createMissionsRouter(authService, missionService, missionSchedulerService, runtimeService),
+);
+
+// Notification routes — the web app's notification bell
+app.use('/v1/notifications', createNotificationsRouter(authService, notificationService));
 
 // Global workflow routes — owner-wide read-only listing for the top-level workflows page
 app.use('/v1/workflows', createGlobalWorkflowsRouter(authService, workflowService));
@@ -420,6 +466,10 @@ app.listen(PORT, async () => {
 	await knowledgeBaseService.failInterruptedProcessing();
 	// Load and schedule all enabled cron triggers on startup
 	await triggerService.loadAll();
+	// Recover missions stranded without a wake time (crash mid-wake), then start
+	// the mission sweep loop — the schedule itself lives in the DB (next_wake_at).
+	await missionSchedulerService.recoverOnBoot();
+	missionSchedulerService.start();
 	// Activate all enabled app triggers (poll timers / webhook subscriptions / stream conns)
 	await appTriggerManager.loadActive();
 	// Start Telegram long-polling for all active bot credentials
@@ -440,6 +490,8 @@ const gracefulShutdown = async (signal: string): Promise<void> => {
 	if (shuttingDown) return;
 	shuttingDown = true;
 	logger.info({ signal }, '[backend] shutting down');
+	// Stop the mission sweep loop — due missions are picked up again on next boot.
+	missionSchedulerService.stop();
 	// Clear app-trigger timers + stream connections before exiting.
 	void appTriggerManager.stopAll();
 	// Close browser sessions (flush visited-URL history + save storageState) and stop

@@ -8,6 +8,7 @@ import type {
 	ChannelType,
 	CredentialMeta,
 	LlmProviderConfig,
+	MissionRuntimeInfo,
 	SkillRuntimeEntry,
 	Workflow,
 	WorkflowTriggerContext,
@@ -22,6 +23,7 @@ import { SkillMaterializerService } from './SkillMaterializerService.js';
 import { KnowledgeBaseService } from './KnowledgeBaseService.js';
 import { ChatFileService } from './ChatFileService.js';
 import { WorkflowRunService } from './WorkflowRunService.js';
+import { MissionService } from './MissionService.js';
 import { BrowserService } from './BrowserService.js';
 import { agentStreamBus } from './AgentStreamBus.js';
 import { logger } from '../config/logger.js';
@@ -95,6 +97,17 @@ export interface WorkflowSpawnConfig {
 	runId: string;
 	definition: Workflow;
 	triggerContext: WorkflowTriggerContext;
+}
+
+/**
+ * Mission config injected into the sandbox for mission wakes (triggerType
+ * 'mission'). Built by MissionSchedulerService via MissionService.buildRuntimeInfo.
+ * For owner steering chats on a mission thread the runtime service derives the
+ * equivalent config itself from the thread's missionId (missionChatMode).
+ */
+export interface MissionSpawnConfig {
+	missionId: string;
+	mission: MissionRuntimeInfo;
 }
 
 // ─── Service ──────────────────────────────────────────────────────────────────
@@ -212,6 +225,7 @@ export class AgentRuntimeService {
 		private readonly workflowRunService: WorkflowRunService,
 		private readonly browserService: BrowserService,
 		private readonly chatFileService: ChatFileService,
+		private readonly missionService: MissionService,
 	) {
 		// Workspaces base: repo root sibling directory by default.
 		// process.cwd() is apps/backend/ so we go up two levels to reach the monorepo root.
@@ -393,6 +407,7 @@ export class AgentRuntimeService {
 		userDatetime?: string,
 		workflowConfig?: WorkflowSpawnConfig,
 		channel?: ChannelType,
+		missionConfig?: MissionSpawnConfig,
 	): Promise<boolean> {
 		// Per-thread duplicate guard — a run is already live or mid-spawn for this
 		// thread. Decline WITHOUT touching thread state, emitting events, or settling
@@ -416,6 +431,7 @@ export class AgentRuntimeService {
 				userDatetime,
 				workflowConfig,
 				channel,
+				missionConfig,
 			);
 		} finally {
 			// By now the run is either in liveRuns (success) or declined/failed —
@@ -433,6 +449,7 @@ export class AgentRuntimeService {
 		userDatetime?: string,
 		workflowConfig?: WorkflowSpawnConfig,
 		channel?: ChannelType,
+		missionConfig?: MissionSpawnConfig,
 	): Promise<boolean> {
 		// Concurrency cap — reject before touching thread state or spawning.
 		if (this.liveRuns.size >= this.maxConcurrent) {
@@ -496,6 +513,31 @@ export class AgentRuntimeService {
 			await this.chatFileService.materializeThreadFiles(threadId, ownerId, workspacePath);
 		}
 
+		// Owner steering: a chat turn on a mission thread runs with the mission
+		// context + tools attached (missionChatMode) so the owner can redirect the
+		// mission live. Mission wakes pass missionConfig explicitly (scheduler);
+		// this derives the same config for chat turns from the thread's missionId.
+		let effectiveMissionConfig = missionConfig;
+		let missionChatMode = false;
+		if (!effectiveMissionConfig && triggerType === 'chat') {
+			try {
+				const thread = await this.sessionService.getThreadByIdInternal(threadId);
+				if (thread?.missionId) {
+					const mission = await this.missionService.getByIdInternal(thread.missionId);
+					if (mission && mission.agentId === agentId) {
+						effectiveMissionConfig = {
+							missionId: mission.id,
+							mission: await this.missionService.buildRuntimeInfo(mission),
+						};
+						missionChatMode = true;
+					}
+				}
+			} catch (err) {
+				// Non-fatal — the turn proceeds as a plain chat turn without mission context.
+				logger.warn({ err, threadId }, '[runtime] failed to load mission context for chat turn');
+			}
+		}
+
 		// Build the runtime config (no secrets) for the runtime.
 		const runtimeConfig = await this.buildRuntimeConfig(
 			agent,
@@ -508,6 +550,8 @@ export class AgentRuntimeService {
 			userDatetime,
 			workflowConfig,
 			channel,
+			effectiveMissionConfig,
+			missionChatMode,
 		);
 
 		// Resolve the effective credential allowlist. When the agent is flagged with
@@ -524,6 +568,7 @@ export class AgentRuntimeService {
 			threadId,
 			credentialIds: effectiveCredentialIds,
 			allCredentials: agent.allCredentials,
+			missionId: effectiveMissionConfig?.missionId,
 		});
 
 		// Mark thread as running before spawning
@@ -757,6 +802,8 @@ export class AgentRuntimeService {
 		userDatetime?: string,
 		workflowConfig?: WorkflowSpawnConfig,
 		channel?: ChannelType,
+		missionConfig?: MissionSpawnConfig,
+		missionChatMode?: boolean,
 	): Promise<AgentRuntimeConfig> {
 		const modelProvider = modelConfig.provider;
 		const modelId = modelConfig.model;
@@ -931,6 +978,11 @@ export class AgentRuntimeService {
 						},
 					}
 				: {}),
+			// Mission context — present for autonomous mission wakes (triggerType
+			// 'mission') and owner steering chats on a mission thread. Gates the
+			// mission_* tools and feeds the mission prompt section in agent-runner.ts.
+			...(missionConfig !== undefined ? { mission: missionConfig.mission } : {}),
+			...(missionChatMode ? { missionChatMode: true } : {}),
 		};
 	}
 }

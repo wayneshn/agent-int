@@ -7,10 +7,11 @@ import { AgentService } from './AgentService.js';
 import { AgentStreamBus } from './AgentStreamBus.js';
 import { AgentSessionService } from './AgentSessionService.js';
 import { AgentMemoryService } from './AgentMemoryService.js';
+import { MissionService } from './MissionService.js';
 import { resolveAgentModel, type ResolvedAgentModel } from './llm/resolveAgentModel.js';
 import { logger } from '../config/logger.js';
 import { v4 as uuidv4 } from 'uuid';
-import type { ContentBlock, MessageTokenUsage } from '@repo/types';
+import type { ContentBlock, MessageTokenUsage, AgentMessageRole } from '@repo/types';
 
 /**
  * Minimum interval between render_ui_partial snapshots per tool call. The
@@ -42,6 +43,7 @@ export class AgentLlmProxyService {
 		private readonly streamBus: AgentStreamBus,
 		private readonly sessionService: AgentSessionService,
 		private readonly memoryService: AgentMemoryService,
+		private readonly missionService: MissionService,
 	) {}
 
 	/**
@@ -58,6 +60,20 @@ export class AgentLlmProxyService {
 			{ agentId: tokenPayload.agentId, threadId: tokenPayload.threadId },
 			'[llm-proxy] received LLM stream request',
 		);
+
+		// Mission budget backstop — the scheduler gates each wake at spawn time, but
+		// a single 40-min turn could still overrun; reject mid-turn once the mission
+		// is >5% past its TOTAL budget. Host-side and token-attributed: the sandbox
+		// can neither skip nor spoof this. The failed call ends the turn with an
+		// error, and the scheduler's failure path pauses the mission.
+		if (tokenPayload.missionId) {
+			const mission = await this.missionService.getByIdInternal(tokenPayload.missionId);
+			if (mission && mission.costTotal >= mission.maxCostTotal * 1.05) {
+				throw new Error(
+					`Mission budget exhausted (~$${mission.costTotal.toFixed(4)} of $${mission.maxCostTotal.toFixed(2)}). The mission has been stopped.`,
+				);
+			}
+		}
 
 		// Resolve agent config and LLM key — apiKey stays on the host
 		const { model, apiKey } = await this.resolveModel(tokenPayload);
@@ -316,6 +332,19 @@ export class AgentLlmProxyService {
 							);
 						}
 
+						// Mission budget accounting — fire-and-forget so a mission-table
+						// hiccup never blocks message persistence or the stream.
+						if (tokenPayload.missionId && usage) {
+							void this.missionService
+								.accumulateCost(tokenPayload.missionId, usage.cost.total)
+								.catch((err) => {
+									logger.warn(
+										{ err, missionId: tokenPayload.missionId },
+										'[llm-proxy] failed to accumulate mission cost',
+									);
+								});
+						}
+
 						logger.info(
 							{
 								agentId: tokenPayload.agentId,
@@ -494,26 +523,41 @@ export class AgentLlmProxyService {
 		agentId: string,
 		ownerId: string,
 		prevThreadId: string,
+		opts?: {
+			/** Message roles to extract from. Default ['user'] (chat behavior). */
+			roles?: AgentMessageRole[];
+			/** metadata.source tag on written memories. Default 'thread_summary'. */
+			source?: string;
+			/** Extraction lens. 'chat' distills the user; 'mission' distills the agent's own output. */
+			mode?: 'chat' | 'mission';
+			/** Mission id, tagged onto memory metadata when distilling a mission wake. */
+			missionId?: string;
+		},
 	): Promise<void> {
+		const roles = opts?.roles ?? ['user'];
+		const mode = opts?.mode ?? 'chat';
+		const source = opts?.source ?? 'thread_summary';
+		const speakerLabel = mode === 'mission' ? 'Agent note' : 'User message';
 		try {
 			// Check that the agent has both an LLM and an embedding model
 			const agent = await this.agentService.getById(agentId, ownerId);
 			if (!agent?.modelConfigId || !agent.embeddingModelConfigId) return;
 
-			// Load user messages from the previous thread only
+			// Load the relevant messages from the thread (roles configurable)
 			const messages = await this.sessionService.listMessagesInternal(prevThreadId);
-			const userMessages = messages.filter((m) => m.role === 'user');
+			const roleSet = new Set(roles);
+			const sourceMessages = messages.filter((m) => roleSet.has(m.role));
 
-			if (userMessages.length === 0) {
+			if (sourceMessages.length === 0) {
 				logger.debug(
-					{ agentId, prevThreadId },
-					'[llm-proxy] summarize: no user messages in previous thread — skipping',
+					{ agentId, prevThreadId, roles },
+					'[llm-proxy] summarize: no matching messages in thread — skipping',
 				);
 				return;
 			}
 
-			// Build a readable transcript from user message text blocks only
-			const transcript = userMessages
+			// Build a readable transcript from the selected messages' text blocks
+			const transcript = sourceMessages
 				.map((m, idx) => {
 					const textBlocks = m.content.filter(
 						(b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text',
@@ -522,7 +566,7 @@ export class AgentLlmProxyService {
 						.map((b) => b.text)
 						.join(' ')
 						.trim();
-					return text ? `User message ${idx + 1}: ${text}` : null;
+					return text ? `${speakerLabel} ${idx + 1}: ${text}` : null;
 				})
 				.filter((line): line is string => line !== null)
 				.join('\n');
@@ -569,20 +613,35 @@ export class AgentLlmProxyService {
 			const { model, apiKey } = await this.resolveModel(fakePayload);
 
 			// Ask the LLM to decide what is new and worth storing.
-			// The response MUST be valid JSON — no markdown fencing.
+			// The response MUST be valid JSON — no markdown fencing. The lens differs
+			// for mission wakes (distill the agent's OWN findings) vs chat (distill the user).
 			const extractionPrompt =
-				`You are a memory extraction assistant. Extract important facts from the user messages below.\n\n` +
-				`Existing stored memories (for dedup — do not repeat these):\n${existingMemoryContext}\n\n` +
-				`User messages from the conversation:\n${transcript}\n\n` +
-				`Rules:\n` +
-				`- Extract IMPORTANT facts only: preferences, personal details, corrections, domain knowledge, goals, constraints.\n` +
-				`- Skip greetings, small talk, one-off questions, or anything ephemeral.\n` +
-				`- Skip anything already covered by the existing memories above.\n` +
-				`- If nothing new is worth remembering, return hasNewMemory: false.\n\n` +
-				`You MUST respond with valid JSON only (no markdown, no explanation):\n` +
-				`{"hasNewMemory":false}\n` +
-				`or\n` +
-				`{"hasNewMemory":true,"memories":[{"content":"<self-contained factual statement>","memoryType":"semantic|procedural|episodic"}]}`;
+				mode === 'mission'
+					? `You are a memory extraction assistant for an autonomous agent working a long-term mission. ` +
+						`Below is the agent's own output from one work session (wake).\n\n` +
+						`Existing stored memories (for dedup — do not repeat these):\n${existingMemoryContext}\n\n` +
+						`The agent's notes/output this session:\n${transcript}\n\n` +
+						`Rules:\n` +
+						`- Extract DURABLE findings the agent should remember for future wakes: learnings, results, working strategies, dead ends to avoid, discovered facts/contacts/URLs, and constraints.\n` +
+						`- Skip routine step narration, restatements of the plan, and anything ephemeral.\n` +
+						`- Skip anything already covered by the existing memories above.\n` +
+						`- If nothing durable was learned, return hasNewMemory: false.\n\n` +
+						`You MUST respond with valid JSON only (no markdown, no explanation):\n` +
+						`{"hasNewMemory":false}\n` +
+						`or\n` +
+						`{"hasNewMemory":true,"memories":[{"content":"<self-contained factual statement>","memoryType":"semantic|procedural|episodic"}]}`
+					: `You are a memory extraction assistant. Extract important facts from the user messages below.\n\n` +
+						`Existing stored memories (for dedup — do not repeat these):\n${existingMemoryContext}\n\n` +
+						`User messages from the conversation:\n${transcript}\n\n` +
+						`Rules:\n` +
+						`- Extract IMPORTANT facts only: preferences, personal details, corrections, domain knowledge, goals, constraints.\n` +
+						`- Skip greetings, small talk, one-off questions, or anything ephemeral.\n` +
+						`- Skip anything already covered by the existing memories above.\n` +
+						`- If nothing new is worth remembering, return hasNewMemory: false.\n\n` +
+						`You MUST respond with valid JSON only (no markdown, no explanation):\n` +
+						`{"hasNewMemory":false}\n` +
+						`or\n` +
+						`{"hasNewMemory":true,"memories":[{"content":"<self-contained factual statement>","memoryType":"semantic|procedural|episodic"}]}`;
 
 			const extractUserMsg: UserMessage = {
 				role: 'user',
@@ -652,7 +711,11 @@ export class AgentLlmProxyService {
 					await this.memoryService.writeMemory(agentId, ownerId, {
 						content: mem.content,
 						memoryType: memoryType as 'episodic' | 'semantic' | 'procedural' | 'working',
-						metadata: { source: 'thread_summary', threadId: prevThreadId },
+						metadata: {
+							source,
+							threadId: prevThreadId,
+							...(opts?.missionId ? { missionId: opts.missionId } : {}),
+						},
 					});
 					writtenCount++;
 				} catch (writeErr) {
@@ -674,6 +737,26 @@ export class AgentLlmProxyService {
 				'[llm-proxy] thread summarization failed (non-fatal)',
 			);
 		}
+	}
+
+	/**
+	 * Distill a completed mission wake thread into agent memory — the mission-aware
+	 * variant of summarizeThreadToMemory. Mission wake threads have no user messages,
+	 * so it reads the agent's OWN assistant output and extracts durable findings for
+	 * future wakes. Fire-and-forget; no-ops when no embedding model is configured.
+	 */
+	async summarizeMissionThreadToMemory(
+		agentId: string,
+		ownerId: string,
+		threadId: string,
+		missionId: string,
+	): Promise<void> {
+		return this.summarizeThreadToMemory(agentId, ownerId, threadId, {
+			roles: ['assistant'],
+			mode: 'mission',
+			source: 'mission_summary',
+			missionId,
+		});
 	}
 
 	/**

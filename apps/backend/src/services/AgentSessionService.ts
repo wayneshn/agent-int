@@ -29,6 +29,8 @@ export interface CreateThreadInput {
 	parentThreadId?: string;
 	/** A2A lineage — server-derived delegation chain (root → initiator) for depth/cycle checks */
 	delegationChain?: string[];
+	/** The mission this thread belongs to (mission wake threads) */
+	missionId?: string;
 }
 
 export interface AppendMessageInput {
@@ -58,6 +60,7 @@ function rowToThread(row: typeof agentThreads.$inferSelect): AgentThread {
 		initiatorAgentId: row.initiatorAgentId ?? undefined,
 		parentThreadId: row.parentThreadId ?? undefined,
 		delegationChain: (row.delegationChain as string[] | null) ?? undefined,
+		missionId: row.missionId ?? undefined,
 		createdAt: row.createdAt,
 		updatedAt: row.updatedAt,
 	};
@@ -102,6 +105,7 @@ export class AgentSessionService {
 				initiatorAgentId: input.initiatorAgentId ?? null,
 				parentThreadId: input.parentThreadId ?? null,
 				delegationChain: input.delegationChain ?? null,
+				missionId: input.missionId ?? null,
 				createdAt: now,
 				updatedAt: now,
 			})
@@ -266,6 +270,22 @@ export class AgentSessionService {
 				updatedAt: new Date(),
 			})
 			.where(eq(agentThreads.id, id));
+	}
+
+	/**
+	 * Sum the estimated USD cost across a thread's assistant messages
+	 * (tokenUsage.cost.total). Used to record per-wake cost for a mission after the
+	 * wake completes. Race-free: assistant messages are persisted before the wake
+	 * process exits. Returns 0 when the thread has no priced messages.
+	 */
+	async sumThreadCost(threadId: string): Promise<number> {
+		const rows = await db
+			.select({
+				total: sql<number>`COALESCE(SUM((${agentMessages.tokenUsage} -> 'cost' ->> 'total')::numeric), 0)::float8`,
+			})
+			.from(agentMessages)
+			.where(eq(agentMessages.threadId, threadId));
+		return Number(rows[0]?.total ?? 0);
 	}
 
 	/**

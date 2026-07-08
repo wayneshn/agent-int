@@ -12,7 +12,14 @@ import type {
 // Server-only: the workflow-step tool catalog lives in @repo/utils (Node-only).
 // It must never be imported in a .svelte/browser file — it is threaded to the
 // builder components as the `toolCatalog` prop from this load instead.
-import { BROWSER_TOOL_GROUP, WORKFLOW_TOOL_CATALOG, WORKFLOW_TOOL_CATEGORIES } from '@repo/utils';
+// Import from the pure-data subpath (not the `@repo/utils` barrel) so the barrel's
+// Node-only side effects (pino logger, node:fs registry) never enter the build —
+// bundling the barrel breaks `pnpm build` (pino-pretty's worker needs `__dirname`).
+import {
+	BROWSER_TOOL_GROUP,
+	WORKFLOW_TOOL_CATALOG,
+	WORKFLOW_TOOL_CATEGORIES
+} from '@repo/utils/workflow/tool-catalog';
 
 /**
  * Unified load for workflow create and edit.

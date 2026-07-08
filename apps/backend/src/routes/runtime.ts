@@ -21,6 +21,9 @@ import { WorkflowRunService } from '../services/WorkflowRunService.js';
 import { WorkflowService } from '../services/WorkflowService.js';
 import { SkillService } from '../services/SkillService.js';
 import { BrowserService } from '../services/BrowserService.js';
+import { MissionService, MISSION_PLAN_MAX_LENGTH } from '../services/MissionService.js';
+import { MissionSchedulerService } from '../services/MissionSchedulerService.js';
+import { OutboundDeliveryService } from '../services/OutboundDeliveryService.js';
 import { agentStreamBus } from '../services/AgentStreamBus.js';
 import { MessagePipeline } from '../channels/pipeline.js';
 import { WebAdapter } from '../channels/web/adapter.js';
@@ -56,6 +59,16 @@ import type {
 	ChatFileUploadResponse,
 	ChatFilesListResponse,
 	ChatFileDeleteResponse,
+	AgentMission,
+	MissionPlanUpdateRequest,
+	MissionLogRequest,
+	MissionScheduleWakeRequest,
+	MissionCompleteRequest,
+	MissionReportRequest,
+	MissionApprovalCreateRequest,
+	CreateMissionRequest,
+	UpdateMissionRequest,
+	MissionControlRequest,
 } from '@repo/types';
 
 /**
@@ -128,6 +141,9 @@ export function createRuntimeRouter(
 	browserService: BrowserService,
 	chatFileService: ChatFileService,
 	messagingService: AgentMessagingService,
+	missionService: MissionService,
+	outboundDeliveryService: OutboundDeliveryService,
+	missionSchedulerService: MissionSchedulerService,
 ): Router {
 	const router = Router();
 	const auth = requireAuth(authService);
@@ -256,80 +272,73 @@ export function createRuntimeRouter(
 	 * Body parsing uses the large internal-router limit (see the '/internal' json
 	 * middleware above) so tool results with large bodies or image blocks fit.
 	 */
-	router.post(
-		'/internal/thread/:threadId/messages',
-		async (req: Request, res: Response) => {
-			const { threadId } = req.params as { threadId: string };
-			const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+	router.post('/internal/thread/:threadId/messages', async (req: Request, res: Response) => {
+		const { threadId } = req.params as { threadId: string };
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
 
-			if (sandboxToken.threadId !== threadId) {
-				res.status(403).json({ success: false, error: 'Thread ID mismatch' });
-				return;
-			}
+		if (sandboxToken.threadId !== threadId) {
+			res.status(403).json({ success: false, error: 'Thread ID mismatch' });
+			return;
+		}
 
-			const { role, content, toolCallId, toolName, tokenUsage } = req.body as {
-				role: string;
-				content: unknown[];
-				toolCallId?: string;
-				toolName?: string;
-				tokenUsage?: unknown;
-			};
+		const { role, content, toolCallId, toolName, tokenUsage } = req.body as {
+			role: string;
+			content: unknown[];
+			toolCallId?: string;
+			toolName?: string;
+			tokenUsage?: unknown;
+		};
 
-			// Enforce that sandboxes may only append tool_result messages.
-			// Any other role would corrupt conversation history.
-			if (role !== 'tool_result') {
-				res.status(400).json({
-					success: false,
-					error: 'Only tool_result messages may be appended by the sandbox',
-				});
-				return;
-			}
+		// Enforce that sandboxes may only append tool_result messages.
+		// Any other role would corrupt conversation history.
+		if (role !== 'tool_result') {
+			res.status(400).json({
+				success: false,
+				error: 'Only tool_result messages may be appended by the sandbox',
+			});
+			return;
+		}
 
-			try {
-				const message = await sessionService.appendMessage({
-					threadId,
-					role,
-					content: content as Parameters<typeof sessionService.appendMessage>[0]['content'],
+		try {
+			const message = await sessionService.appendMessage({
+				threadId,
+				role,
+				content: content as Parameters<typeof sessionService.appendMessage>[0]['content'],
+				toolCallId,
+				toolName,
+				tokenUsage: tokenUsage as Parameters<typeof sessionService.appendMessage>[0]['tokenUsage'],
+			});
+
+			// Emit tool_call_end SSE so the browser can display the result inside
+			// the ToolCallIndicator that was opened by the earlier tool_call_delta event.
+			// The result string is normalised (text only, truncated to 250 chars) before
+			// being sent to avoid flooding the SSE stream with large payloads.
+			if (toolCallId) {
+				const blocks = content as Parameters<typeof sessionService.appendMessage>[0]['content'];
+				const resultText = formatToolResult(blocks);
+				// Carry any image blocks (e.g. a browser screenshot) so the chat UI can
+				// render them live — formatToolResult is text-only, so without this the
+				// image would only appear after a page reload.
+				const images = blocks
+					.filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
+					.map((b) => ({ data: b.data, mimeType: b.mimeType }));
+				agentStreamBus.emit(sandboxToken.threadId, {
+					type: 'tool_call_end',
+					// messageId is not used by the frontend handler for tool_call_end;
+					// the result is keyed purely by toolCallId.
+					messageId: '',
 					toolCallId,
-					toolName,
-					tokenUsage: tokenUsage as Parameters<
-						typeof sessionService.appendMessage
-					>[0]['tokenUsage'],
+					result: resultText,
+					...(images.length > 0 ? { images } : {}),
 				});
-
-				// Emit tool_call_end SSE so the browser can display the result inside
-				// the ToolCallIndicator that was opened by the earlier tool_call_delta event.
-				// The result string is normalised (text only, truncated to 250 chars) before
-				// being sent to avoid flooding the SSE stream with large payloads.
-				if (toolCallId) {
-					const blocks = content as Parameters<
-						typeof sessionService.appendMessage
-					>[0]['content'];
-					const resultText = formatToolResult(blocks);
-					// Carry any image blocks (e.g. a browser screenshot) so the chat UI can
-					// render them live — formatToolResult is text-only, so without this the
-					// image would only appear after a page reload.
-					const images = blocks
-						.filter((b): b is Extract<ContentBlock, { type: 'image' }> => b.type === 'image')
-						.map((b) => ({ data: b.data, mimeType: b.mimeType }));
-					agentStreamBus.emit(sandboxToken.threadId, {
-						type: 'tool_call_end',
-						// messageId is not used by the frontend handler for tool_call_end;
-						// the result is keyed purely by toolCallId.
-						messageId: '',
-						toolCallId,
-						result: resultText,
-						...(images.length > 0 ? { images } : {}),
-					});
-				}
-
-				res.status(201).json({ success: true, data: message });
-			} catch (err) {
-				logger.error({ err, threadId }, '[runtime] failed to append internal message');
-				res.status(500).json({ success: false, error: 'Failed to append message' });
 			}
-		},
-	);
+
+			res.status(201).json({ success: true, data: message });
+		} catch (err) {
+			logger.error({ err, threadId }, '[runtime] failed to append internal message');
+			res.status(500).json({ success: false, error: 'Failed to append message' });
+		}
+	});
 
 	/**
 	 * POST /v1/runtime/internal/proxy
@@ -476,10 +485,7 @@ export function createRuntimeRouter(
 			const workspacePath = runtimeService.getWorkspacePath(sandboxToken.agentId);
 			// Link to the latest ASSISTANT message so the attachment renders under the
 			// agent's bubble (a later tool_result in the same turn would not render).
-			const messageId = await sessionService.getLatestMessageId(
-				sandboxToken.threadId,
-				'assistant',
-			);
+			const messageId = await sessionService.getLatestMessageId(sandboxToken.threadId, 'assistant');
 			const file = await chatFileService.registerAgentOutput({
 				agentId: sandboxToken.agentId,
 				ownerId: sandboxToken.ownerId,
@@ -910,8 +916,7 @@ export function createRuntimeRouter(
 				// a download for it regardless of the inline default. Other types preview
 				// inline unless ?download=1 was requested.
 				const forceAttachment = serveMime === 'text/html';
-				const disposition =
-					req.query.download === '1' || forceAttachment ? 'attachment' : 'inline';
+				const disposition = req.query.download === '1' || forceAttachment ? 'attachment' : 'inline';
 				res.setHeader('Content-Type', serveMime);
 				// Stop the browser from MIME-sniffing the bytes into an executable type.
 				res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -1543,7 +1548,11 @@ export function createRuntimeRouter(
 						'[runtime] agent-triggered workflow spawn threw',
 					);
 					await workflowRunService
-						.completeRun(run.id, 'error', spawnErr instanceof Error ? spawnErr.message : String(spawnErr))
+						.completeRun(
+							run.id,
+							'error',
+							spawnErr instanceof Error ? spawnErr.message : String(spawnErr),
+						)
 						.catch(() => {});
 				});
 
@@ -1822,6 +1831,433 @@ export function createRuntimeRouter(
 			const message = err instanceof Error ? err.message : 'Skill trace failed';
 			logger.error({ err, agentId: sandboxToken.agentId }, '[runtime] skill trace failed');
 			res.status(400).json({ success: false, error: message });
+		}
+	});
+
+	// ─── Mission internal endpoints (PROXY_TOKEN auth) ────────────────────────
+
+	/**
+	 * Resolve and authorize the mission for a sandbox request. The missionId comes
+	 * ONLY from the PROXY_TOKEN (set at spawn) — never from the request body — and
+	 * the mission must belong to the token's agent. Responds with the failure and
+	 * returns null when the request is not authorized.
+	 *
+	 * `activeOnly` guards state-changing scheduling calls; journal-style writes
+	 * (plan/log/report) are also allowed while paused so an owner steering chat on
+	 * a paused mission still works.
+	 */
+	const requireMission = async (
+		req: Request,
+		res: Response,
+		activeOnly: boolean,
+	): Promise<AgentMission | null> => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		if (!sandboxToken.missionId) {
+			res.status(403).json({ success: false, error: 'This turn is not part of a mission' });
+			return null;
+		}
+		const mission = await missionService.getByIdInternal(sandboxToken.missionId);
+		if (!mission || mission.agentId !== sandboxToken.agentId) {
+			res.status(404).json({ success: false, error: 'Mission not found' });
+			return null;
+		}
+		if (activeOnly && mission.status !== 'active') {
+			res.status(409).json({ success: false, error: `Mission is ${mission.status}` });
+			return null;
+		}
+		if (!activeOnly && mission.status !== 'active' && mission.status !== 'paused') {
+			res.status(409).json({ success: false, error: `Mission is ${mission.status}` });
+			return null;
+		}
+		return mission;
+	};
+
+	/**
+	 * POST /v1/runtime/internal/mission/plan
+	 * Agent rewrites its mission plan document (persistent memory across wakes).
+	 */
+	router.post('/internal/mission/plan', async (req: Request, res: Response) => {
+		const body = req.body as MissionPlanUpdateRequest;
+		if (typeof body.plan !== 'string' || body.plan.trim().length === 0) {
+			res.status(400).json({ success: false, error: 'plan (non-empty string) is required' });
+			return;
+		}
+		if (body.plan.length > MISSION_PLAN_MAX_LENGTH) {
+			res.status(400).json({
+				success: false,
+				error: `plan exceeds the ${MISSION_PLAN_MAX_LENGTH} character limit — keep it a concise working document`,
+			});
+			return;
+		}
+		const mission = await requireMission(req, res, false);
+		if (!mission) return;
+		try {
+			await missionService.setPlanDocument(mission.id, body.plan);
+			res.json({ success: true, data: { updated: true } });
+		} catch (err) {
+			logger.error({ err, missionId: mission.id }, '[runtime] mission plan update failed');
+			res.status(500).json({ success: false, error: 'Failed to update the plan document' });
+		}
+	});
+
+	/**
+	 * POST /v1/runtime/internal/mission/log
+	 * Agent appends an entry to the mission activity journal (owner-facing feed).
+	 */
+	router.post('/internal/mission/log', async (req: Request, res: Response) => {
+		const body = req.body as MissionLogRequest;
+		if (typeof body.title !== 'string' || body.title.trim().length === 0) {
+			res.status(400).json({ success: false, error: 'title (non-empty string) is required' });
+			return;
+		}
+		if (body.title.length > 500 || (body.body !== undefined && body.body.length > 10_000)) {
+			res.status(400).json({
+				success: false,
+				error: 'title is capped at 500 characters and body at 10000 characters',
+			});
+			return;
+		}
+		const mission = await requireMission(req, res, false);
+		if (!mission) return;
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		try {
+			const event = await missionService.appendEvent(mission.id, mission.ownerId, {
+				type: 'log',
+				title: body.title,
+				body: body.body,
+				data: body.data,
+				threadId: sandboxToken.threadId,
+			});
+			res.status(201).json({ success: true, data: event });
+		} catch (err) {
+			logger.error({ err, missionId: mission.id }, '[runtime] mission log failed');
+			res.status(500).json({ success: false, error: 'Failed to append the journal entry' });
+		}
+	});
+
+	/**
+	 * POST /v1/runtime/internal/mission/schedule
+	 * Agent schedules its own next wake. Clamped host-side to the mission's
+	 * min/max interval; the response carries the ACTUAL scheduled time. For
+	 * fixed-cron missions the request is a no-op that returns the cron-driven
+	 * wake time, so the agent learns its schedule is not self-directed.
+	 */
+	router.post('/internal/mission/schedule', async (req: Request, res: Response) => {
+		const body = req.body as MissionScheduleWakeRequest;
+		let requested: Date | null = null;
+		if (typeof body.at === 'string') {
+			const parsed = new Date(body.at);
+			if (!Number.isNaN(parsed.getTime())) requested = parsed;
+		} else if (typeof body.delayMinutes === 'number' && Number.isFinite(body.delayMinutes)) {
+			requested = new Date(Date.now() + Math.max(body.delayMinutes, 0) * 60_000);
+		}
+		if (!requested) {
+			res.status(400).json({
+				success: false,
+				error: 'Provide either at (ISO datetime) or delayMinutes (number)',
+			});
+			return;
+		}
+		const mission = await requireMission(req, res, true);
+		if (!mission) return;
+		try {
+			if (mission.scheduleMode === 'fixed') {
+				res.json({
+					success: true,
+					data: { scheduledAt: mission.nextWakeAt?.toISOString() ?? requested.toISOString() },
+				});
+				return;
+			}
+			const actual = await missionService.setNextWake(mission.id, requested, 'agent', body.reason);
+			res.json({ success: true, data: { scheduledAt: actual.toISOString() } });
+		} catch (err) {
+			logger.error({ err, missionId: mission.id }, '[runtime] mission schedule failed');
+			res.status(500).json({ success: false, error: 'Failed to schedule the next wake' });
+		}
+	});
+
+	/**
+	 * POST /v1/runtime/internal/mission/complete
+	 * Agent declares the mission goal achieved (or permanently unachievable).
+	 */
+	router.post('/internal/mission/complete', async (req: Request, res: Response) => {
+		const body = req.body as MissionCompleteRequest;
+		if (typeof body.summary !== 'string' || body.summary.trim().length === 0) {
+			res.status(400).json({ success: false, error: 'summary (non-empty string) is required' });
+			return;
+		}
+		const mission = await requireMission(req, res, true);
+		if (!mission) return;
+		try {
+			await missionService.completeFromAgent(mission.id, body.summary.slice(0, 10_000));
+			void outboundDeliveryService.deliverToOwner({
+				ownerId: mission.ownerId,
+				agentId: mission.agentId,
+				missionId: mission.id,
+				type: 'mission_completed',
+				title: `Mission "${mission.title}" completed`,
+				body: body.summary.slice(0, 2_000),
+				linkPath: `/app/agents/${mission.agentId}/missions/${mission.id}`,
+				preferredLinkId: mission.reportChannelLinkId,
+			});
+			res.json({ success: true, data: { completed: true } });
+		} catch (err) {
+			logger.error({ err, missionId: mission.id }, '[runtime] mission complete failed');
+			res.status(500).json({ success: false, error: 'Failed to complete the mission' });
+		}
+	});
+
+	/**
+	 * POST /v1/runtime/internal/mission/report
+	 * Agent sends a proactive progress report to the owner: journal event +
+	 * in-app notification + best-effort channel push (Telegram/Discord).
+	 */
+	router.post('/internal/mission/report', async (req: Request, res: Response) => {
+		const body = req.body as MissionReportRequest;
+		if (
+			typeof body.title !== 'string' ||
+			body.title.trim().length === 0 ||
+			typeof body.message !== 'string' ||
+			body.message.trim().length === 0
+		) {
+			res.status(400).json({ success: false, error: 'title and message are required' });
+			return;
+		}
+		if (body.title.length > 300 || body.message.length > 8_000) {
+			res.status(400).json({
+				success: false,
+				error: 'title is capped at 300 characters and message at 8000 characters',
+			});
+			return;
+		}
+		const mission = await requireMission(req, res, false);
+		if (!mission) return;
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		try {
+			await missionService.appendEvent(mission.id, mission.ownerId, {
+				type: 'report',
+				title: body.title,
+				body: body.message,
+				threadId: sandboxToken.threadId,
+			});
+			const { channels } = await outboundDeliveryService.deliverToOwner({
+				ownerId: mission.ownerId,
+				agentId: mission.agentId,
+				missionId: mission.id,
+				type: 'mission_report',
+				title: `${mission.title}: ${body.title}`,
+				body: body.message,
+				linkPath: `/app/agents/${mission.agentId}/missions/${mission.id}`,
+				preferredLinkId: mission.reportChannelLinkId,
+			});
+			res.status(201).json({ success: true, data: { delivered: channels } });
+		} catch (err) {
+			logger.error({ err, missionId: mission.id }, '[runtime] mission report failed');
+			res.status(500).json({ success: false, error: 'Failed to deliver the report' });
+		}
+	});
+
+	/**
+	 * POST /v1/runtime/internal/mission/approval
+	 * Agent raises an ASYNC approval request. Unlike ask_human this returns
+	 * immediately — the turn continues/ends, the owner decides in the UI, and the
+	 * decision is injected into a later wake's prompt.
+	 */
+	router.post('/internal/mission/approval', async (req: Request, res: Response) => {
+		const body = req.body as MissionApprovalCreateRequest;
+		if (
+			typeof body.action !== 'string' ||
+			body.action.trim().length === 0 ||
+			typeof body.rationale !== 'string' ||
+			body.rationale.trim().length === 0
+		) {
+			res.status(400).json({ success: false, error: 'action and rationale are required' });
+			return;
+		}
+		if (body.action.length > 500 || body.rationale.length > 4_000) {
+			res.status(400).json({
+				success: false,
+				error: 'action is capped at 500 characters and rationale at 4000 characters',
+			});
+			return;
+		}
+		const mission = await requireMission(req, res, false);
+		if (!mission) return;
+		try {
+			// Bound the pending queue so a looping agent cannot flood the owner.
+			const approvals = await missionService.listApprovals(mission.id, mission.ownerId);
+			const pendingCount = approvals.filter((a) => a.status === 'pending').length;
+			if (pendingCount >= 10) {
+				res.status(429).json({
+					success: false,
+					error:
+						'Too many approvals are already pending for this mission. Wait for the owner to decide before requesting more.',
+				});
+				return;
+			}
+			const approval = await missionService.createApproval(mission.id, mission.ownerId, {
+				action: body.action,
+				rationale: body.rationale,
+			});
+			void outboundDeliveryService.deliverToOwner({
+				ownerId: mission.ownerId,
+				agentId: mission.agentId,
+				missionId: mission.id,
+				type: 'approval_requested',
+				title: `Mission "${mission.title}" needs approval`,
+				body: `${body.action}\n\nWhy: ${body.rationale}`,
+				linkPath: `/app/agents/${mission.agentId}/missions/${mission.id}`,
+				preferredLinkId: mission.reportChannelLinkId,
+			});
+			res.status(201).json({ success: true, data: { approvalId: approval.id } });
+		} catch (err) {
+			logger.error({ err, missionId: mission.id }, '[runtime] mission approval failed');
+			res.status(500).json({ success: false, error: 'Failed to create the approval request' });
+		}
+	});
+
+	// ─── Mission MANAGEMENT internal endpoints (PROXY_TOKEN auth) ──────────────
+	// These let an agent set up and control its OWN missions from a chat turn
+	// (list/read/create/update/control) — the mission equivalent of the workflow
+	// tools. Everything is scoped to the token's agentId + ownerId; the sandbox
+	// can never touch another agent's missions. Gated agent-side to chat turns.
+
+	/** GET /internal/missions — list this agent's missions */
+	router.get('/internal/missions', async (req: Request, res: Response) => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		try {
+			const missions = await missionService.listByAgent(sandboxToken.agentId, sandboxToken.ownerId);
+			res.json({ success: true, data: missions });
+		} catch (err) {
+			logger.error({ err, agentId: sandboxToken.agentId }, '[runtime] list missions failed');
+			res.status(500).json({ success: false, error: 'Failed to list missions' });
+		}
+	});
+
+	/**
+	 * Load a mission and verify it belongs to the token's agent. Responds with the
+	 * failure and returns null when not found / not owned by this agent.
+	 */
+	const loadOwnedMission = async (req: Request, res: Response): Promise<AgentMission | null> => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		const { missionId } = req.params as { missionId: string };
+		const mission = await missionService.getById(missionId, sandboxToken.ownerId);
+		if (!mission || mission.agentId !== sandboxToken.agentId) {
+			res.status(404).json({ success: false, error: 'Mission not found' });
+			return null;
+		}
+		return mission;
+	};
+
+	/** GET /internal/missions/:missionId — read one of this agent's missions */
+	router.get('/internal/missions/:missionId', async (req: Request, res: Response) => {
+		const mission = await loadOwnedMission(req, res);
+		if (!mission) return;
+		res.json({ success: true, data: mission });
+	});
+
+	/** POST /internal/missions — create a mission for this agent */
+	router.post('/internal/missions', async (req: Request, res: Response) => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		const body = req.body as CreateMissionRequest;
+		if (!body.title?.trim() || !body.goal?.trim()) {
+			res.status(400).json({ success: false, error: 'title and goal are required' });
+			return;
+		}
+		if (typeof body.maxCostTotal !== 'number' || !(body.maxCostTotal > 0)) {
+			res.status(400).json({ success: false, error: 'maxCostTotal must be a positive number' });
+			return;
+		}
+		if (body.scheduleMode === 'fixed' && !body.cronExpr?.trim()) {
+			res.status(400).json({ success: false, error: 'cronExpr is required for fixed schedules' });
+			return;
+		}
+		try {
+			const mission = await missionService.create(sandboxToken.agentId, sandboxToken.ownerId, body);
+			if (!mission) {
+				res.status(404).json({ success: false, error: 'Agent not found' });
+				return;
+			}
+			res.status(201).json({ success: true, data: mission });
+		} catch (err) {
+			logger.error({ err, agentId: sandboxToken.agentId }, '[runtime] create mission failed');
+			res.status(500).json({ success: false, error: 'Failed to create the mission' });
+		}
+	});
+
+	/** POST /internal/missions/:missionId/update — edit an existing mission */
+	router.post('/internal/missions/:missionId/update', async (req: Request, res: Response) => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		const existing = await loadOwnedMission(req, res);
+		if (!existing) return;
+		const body = req.body as UpdateMissionRequest;
+		if (body.maxCostTotal !== undefined && !(body.maxCostTotal > 0)) {
+			res.status(400).json({ success: false, error: 'maxCostTotal must be a positive number' });
+			return;
+		}
+		try {
+			const mission = await missionService.update(existing.id, sandboxToken.ownerId, body);
+			res.json({ success: true, data: mission });
+		} catch (err) {
+			logger.error({ err, missionId: existing.id }, '[runtime] update mission failed');
+			res.status(500).json({ success: false, error: 'Failed to update the mission' });
+		}
+	});
+
+	/**
+	 * POST /internal/missions/:missionId/control — activate | pause | complete | wake.
+	 * 'pause' also cancels a live wake turn; 'wake' runs the scheduler's manual wake.
+	 */
+	router.post('/internal/missions/:missionId/control', async (req: Request, res: Response) => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		const existing = await loadOwnedMission(req, res);
+		if (!existing) return;
+		const { action } = req.body as MissionControlRequest;
+		try {
+			switch (action) {
+				case 'activate': {
+					const mission = await missionService.activate(existing.id, sandboxToken.ownerId);
+					res.json({ success: true, data: mission });
+					return;
+				}
+				case 'pause': {
+					const mission = await missionService.pause(
+						existing.id,
+						sandboxToken.ownerId,
+						'paused_by_agent',
+					);
+					if (mission?.currentThreadId) {
+						await runtimeService.cancelTurn(mission.currentThreadId);
+					}
+					res.json({ success: true, data: mission });
+					return;
+				}
+				case 'complete': {
+					const mission = await missionService.complete(existing.id, sandboxToken.ownerId);
+					res.json({ success: true, data: mission });
+					return;
+				}
+				case 'wake': {
+					const result = await missionSchedulerService.wakeNow(existing.id, sandboxToken.ownerId);
+					if (!result) {
+						res.status(409).json({
+							success: false,
+							error: 'Mission is not active, is over budget, or a wake is already running',
+						});
+						return;
+					}
+					res.status(201).json({ success: true, data: result });
+					return;
+				}
+				default:
+					res.status(400).json({
+						success: false,
+						error: "action must be 'activate', 'pause', 'complete', or 'wake'",
+					});
+			}
+		} catch (err) {
+			logger.error({ err, missionId: existing.id, action }, '[runtime] mission control failed');
+			res.status(500).json({ success: false, error: 'Failed to control the mission' });
 		}
 	});
 

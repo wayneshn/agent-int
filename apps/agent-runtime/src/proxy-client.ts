@@ -18,6 +18,8 @@ import type {
 	AgentAskResult,
 	BrowserActionRequest,
 	BrowserActionResult,
+	McpCallToolRequest,
+	McpCallToolResult,
 	SkillTraceRequestBody,
 	AgentMemoryEntry,
 	AgentMemorySearchResult,
@@ -27,6 +29,16 @@ import type {
 	Workflow,
 	WorkflowSpec,
 	ChatFile,
+	MissionEvent,
+	MissionLogRequest,
+	MissionScheduleWakeRequest,
+	MissionScheduleWakeResult,
+	MissionReportRequest,
+	MissionApprovalCreateResult,
+	AgentMission,
+	CreateMissionRequest,
+	UpdateMissionRequest,
+	MissionControlAction,
 } from '@repo/types';
 
 // Per-call request timeouts. Without them, an unreachable backend (e.g. a runtime
@@ -543,15 +555,12 @@ export class ProxyClient {
 		message: string,
 		context?: string,
 	): Promise<AgentMessageResult> {
-		const res = await fetch(
-			`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/message`,
-			{
-				method: 'POST',
-				headers: this.authHeaders(),
-				body: JSON.stringify({ message, context }),
-				signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-			},
-		);
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/message`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify({ message, context }),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -578,15 +587,12 @@ export class ProxyClient {
 		message: string,
 		context?: string,
 	): Promise<AgentAskResult> {
-		const started = await fetch(
-			`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/ask`,
-			{
-				method: 'POST',
-				headers: this.authHeaders(),
-				body: JSON.stringify({ message, context }),
-				signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-			},
-		);
+		const started = await fetch(`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/ask`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify({ message, context }),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
 		const startJson = (await started.json()) as {
 			success: boolean;
 			data?: AgentAskStartResult;
@@ -665,6 +671,33 @@ export class ProxyClient {
 		return json.data;
 	}
 
+	// ─── MCP ──────────────────────────────────────────────────────────────────
+
+	/**
+	 * Invoke one tool on an assigned MCP server via the host. The live connection
+	 * and all secrets stay host-side in McpService; this sandbox only sends the
+	 * server id + tool name + args. Uses the long IO timeout since MCP tools may
+	 * perform slow network work.
+	 */
+	async mcpCallTool(request: McpCallToolRequest): Promise<McpCallToolResult> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mcp/call-tool`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify(request),
+			signal: AbortSignal.timeout(IO_TIMEOUT_MS),
+		});
+
+		const json = (await res.json()) as {
+			success: boolean;
+			data?: McpCallToolResult;
+			error?: string;
+		};
+		if (!json.success || !json.data) {
+			throw new Error(`MCP tool call failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
 	// ─── Files ────────────────────────────────────────────────────────────────
 
 	/**
@@ -685,6 +718,189 @@ export class ProxyClient {
 			throw new Error(`Share file failed: ${json.error ?? 'unknown error'}`);
 		}
 		return json.data;
+	}
+
+	// ─── Mission (autonomous long-term goals) ─────────────────────────────────
+	// All mission endpoints are authorized by the missionId claim in the
+	// PROXY_TOKEN — the sandbox never supplies a mission id.
+
+	/** Rewrite the mission's plan document (persistent memory across wakes) */
+	async missionUpdatePlan(plan: string): Promise<void> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/plan`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify({ plan }),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as { success: boolean; error?: string };
+		if (!json.success) {
+			throw new Error(`Mission plan update failed: ${json.error ?? 'unknown error'}`);
+		}
+	}
+
+	/** Append an entry to the mission activity journal */
+	async missionLog(input: MissionLogRequest): Promise<MissionEvent> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/log`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify(input),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as { success: boolean; data?: MissionEvent; error?: string };
+		if (!json.success || !json.data) {
+			throw new Error(`Mission log failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	/** Schedule the next wake; returns the ACTUAL (host-clamped) wake time */
+	async missionScheduleNextWake(
+		input: MissionScheduleWakeRequest,
+	): Promise<MissionScheduleWakeResult> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/schedule`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify(input),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as {
+			success: boolean;
+			data?: MissionScheduleWakeResult;
+			error?: string;
+		};
+		if (!json.success || !json.data) {
+			throw new Error(`Mission schedule failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	/** Declare the mission's goal achieved (or permanently unachievable) */
+	async missionComplete(summary: string): Promise<void> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/complete`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify({ summary }),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as { success: boolean; error?: string };
+		if (!json.success) {
+			throw new Error(`Mission complete failed: ${json.error ?? 'unknown error'}`);
+		}
+	}
+
+	/** Send a proactive progress report to the owner; returns delivery channels */
+	async missionReport(input: MissionReportRequest): Promise<{ delivered: string[] }> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/report`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify(input),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as {
+			success: boolean;
+			data?: { delivered: string[] };
+			error?: string;
+		};
+		if (!json.success || !json.data) {
+			throw new Error(`Mission report failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	/** Raise an ASYNC approval request (returns immediately — no waiting) */
+	async missionRequestApproval(
+		action: string,
+		rationale: string,
+	): Promise<MissionApprovalCreateResult> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/approval`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify({ action, rationale }),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as {
+			success: boolean;
+			data?: MissionApprovalCreateResult;
+			error?: string;
+		};
+		if (!json.success || !json.data) {
+			throw new Error(`Approval request failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	// ─── Mission management (chat turns) ──────────────────────────────────────
+	// Let the agent set up and control its OWN missions conversationally. All are
+	// scoped host-side to the token's agentId + ownerId.
+
+	/** List this agent's missions */
+	async listMissions(): Promise<AgentMission[]> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions`, {
+			headers: this.authHeaders(),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as { success: boolean; data?: AgentMission[]; error?: string };
+		if (!json.success || !json.data) {
+			throw new Error(`List missions failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	/** Read one of this agent's missions */
+	async readMission(missionId: string): Promise<AgentMission> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions/${missionId}`, {
+			headers: this.authHeaders(),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as { success: boolean; data?: AgentMission; error?: string };
+		if (!json.success || !json.data) {
+			throw new Error(`Read mission failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	/** Create a mission for this agent (draft unless input.activate) */
+	async createMission(input: CreateMissionRequest): Promise<AgentMission> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify(input),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as { success: boolean; data?: AgentMission; error?: string };
+		if (!json.success || !json.data) {
+			throw new Error(`Create mission failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	/** Update an existing mission's goal/schedule/budgets/policy */
+	async updateMission(missionId: string, input: UpdateMissionRequest): Promise<AgentMission> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions/${missionId}/update`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify(input),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as { success: boolean; data?: AgentMission; error?: string };
+		if (!json.success || !json.data) {
+			throw new Error(`Update mission failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	/** Control a mission: activate | pause | complete | wake */
+	async controlMission(missionId: string, action: MissionControlAction): Promise<void> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions/${missionId}/control`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify({ action }),
+			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+		});
+		const json = (await res.json()) as { success: boolean; error?: string };
+		if (!json.success) {
+			throw new Error(`Mission ${action} failed: ${json.error ?? 'unknown error'}`);
+		}
 	}
 
 	// ─── Config ───────────────────────────────────────────────────────────────

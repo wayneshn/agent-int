@@ -72,6 +72,14 @@ export class DiscordGatewayManager {
 	}
 
 	/**
+	 * The running adapter for a bot credential, for proactive outbound sends
+	 * (OutboundDeliveryService). Undefined when no gateway is active for it.
+	 */
+	getAdapter(credentialId: string): DiscordAdapter | undefined {
+		return this.adapters.get(credentialId);
+	}
+
+	/**
 	 * Stop the gateway for a given credentialId.
 	 * Called when the bot credential is deleted, or when the last channel link
 	 * using the credential is removed. No-op if nothing is running for it.

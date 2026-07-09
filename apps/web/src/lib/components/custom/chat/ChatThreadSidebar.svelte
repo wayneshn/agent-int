@@ -89,10 +89,12 @@
 	 */
 	/**
 	 * Background threads are those not started by the user directly in chat — workflow
-	 * runs and agent-to-agent messages. Both are hidden behind the same toggle.
+	 * runs, agent-to-agent messages, and autonomous mission wakes. All are hidden
+	 * behind the same toggle (the mission detail page's "Steer via chat" still opens
+	 * a mission wake thread directly).
 	 */
 	const isBackgroundThread = (t: (typeof threads)[number]) =>
-		t.isWorkflowThread || t.triggerType === 'agent';
+		t.isWorkflowThread || t.triggerType === 'agent' || t.triggerType === 'mission';
 
 	let filteredThreads = $derived(() => {
 		const base = showWorkflowThreads ? [...threads] : threads.filter((t) => !isBackgroundThread(t));
@@ -309,6 +311,12 @@
 										>
 											from agent
 										</span>
+									{:else if thread.triggerType === 'mission'}
+										<span
+											class="rounded bg-muted px-1 py-px text-[9px] font-medium text-muted-foreground"
+										>
+											mission
+										</span>
 									{/if}
 								</span>
 							</a>
@@ -349,10 +357,7 @@
 										Rename
 									</DropdownMenu.Item>
 									{#if browserAvailable}
-										<DropdownMenu.Item
-											onSelect={() => onBrowserSession?.(thread)}
-											class="gap-2"
-										>
+										<DropdownMenu.Item onSelect={() => onBrowserSession?.(thread)} class="gap-2">
 											<GlobeIcon class="size-3.5 text-muted-foreground" />
 											Browser
 										</DropdownMenu.Item>

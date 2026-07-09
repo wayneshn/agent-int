@@ -47,6 +47,7 @@ export default defineConfig({
 						{ text: 'Web Browser', link: '/guide/browser' },
 						{ text: 'LLM Providers', link: '/guide/llm-providers' },
 						{ text: 'Credentials', link: '/guide/credentials' },
+						{ text: 'MCP Servers', link: '/guide/mcp-servers' },
 						{ text: 'Skills', link: '/guide/skills' },
 						{ text: 'Knowledge Base', link: '/guide/knowledge-base' },
 						{ text: 'Agent Memory', link: '/guide/memory' },

@@ -1,6 +1,7 @@
 <script lang="ts">
 	import PageHeader from '$lib/components/page-header.svelte';
 	import HomeStats from '$lib/components/custom/home/home-stats.svelte';
+	import HomeMissions from '$lib/components/custom/home/home-missions.svelte';
 	import HomeAgentsGrid from '$lib/components/custom/home/home-agents-grid.svelte';
 	import HomeTopWorkflows from '$lib/components/custom/home/home-top-workflows.svelte';
 	import HomeRecentActivity from '$lib/components/custom/home/home-recent-activity.svelte';
@@ -28,6 +29,10 @@
 	credentialCount={data.credentials.length}
 	knowledgeCount={data.knowledgeFiles.length}
 />
+
+{#if data.missionsSummary && (data.missionsSummary.activeCount > 0 || data.missionsSummary.pendingApprovals.length > 0)}
+	<HomeMissions summary={data.missionsSummary} />
+{/if}
 
 <HomeAgentsGrid agents={data.agents} />
 

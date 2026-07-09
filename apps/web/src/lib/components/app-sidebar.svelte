@@ -17,6 +17,7 @@
 	import BookOpenIcon from '@lucide/svelte/icons/book-open';
 	import WorkflowIcon from '@lucide/svelte/icons/workflow';
 	import CpuIcon from '@lucide/svelte/icons/cpu';
+	import PlugIcon from '@lucide/svelte/icons/plug';
 	import UserIcon from '@lucide/svelte/icons/user';
 	import KeyIcon from '@lucide/svelte/icons/key';
 	import LogOutIcon from '@lucide/svelte/icons/log-out';
@@ -57,6 +58,7 @@
 		{ title: 'Credentials', url: '/app/credentials', icon: ShieldIcon },
 		{ title: 'Skills', url: '/app/skills', icon: SparklesIcon },
 		{ title: 'Knowledge', url: '/app/knowledge', icon: BookOpenIcon },
+		{ title: 'MCP Servers', url: '/app/mcp-servers', icon: PlugIcon },
 		{ title: 'LLM Providers', url: '/app/llm-providers', icon: CpuIcon }
 	];
 

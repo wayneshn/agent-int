@@ -17,3 +17,6 @@ export * from './channel.js';
 export * from './knowledge.js';
 export * from './chatFile.js';
 export * from './activity.js';
+export * from './mission.js';
+export * from './notification.js';
+export * from './mcp.js';

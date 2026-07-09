@@ -27,6 +27,7 @@ import type {
 	SandboxTokenPayload,
 } from '@repo/types';
 import { logger } from '../config/logger.js';
+import { isBlockedAddress } from '../utils/ssrfGuard.js';
 import type { AgentService } from './AgentService.js';
 import {
 	collectInteractiveElements,
@@ -1282,78 +1283,3 @@ function safeUrl(page: Page): string {
 	}
 }
 
-/**
- * True for IPs an agent's browser must not reach: loopback, link-local (incl. the
- * 169.254.169.254 cloud-metadata endpoint), RFC-1918 private, CGNAT, and the
- * unspecified/"this-network" ranges — for both IPv4 and IPv6 (incl. IPv4-mapped).
- */
-function isBlockedAddress(ip: string): boolean {
-	const fam = isIP(ip);
-	if (fam === 4) return isBlockedIPv4(ip);
-	if (fam === 6) {
-		const bytes = ipv6ToBytes(ip.toLowerCase());
-		if (!bytes) return true; // unparseable → block defensively
-		// IPv4-mapped (::ffff:a.b.c.d, however the URL parser spelled it) — the
-		// embedded v4 is what actually gets dialled on a dual-stack host.
-		if (bytes.slice(0, 10).every((b) => b === 0) && bytes[10] === 0xff && bytes[11] === 0xff) {
-			return isBlockedIPv4(bytes.slice(12).join('.'));
-		}
-		// ::, ::1, and IPv4-compatible ::a.b.c.d (all start with 12 zero bytes).
-		if (bytes.slice(0, 12).every((b) => b === 0)) return true;
-		if ((bytes[0] & 0xfe) === 0xfc) return true; // fc00::/7 unique-local
-		if (bytes[0] === 0xfe && (bytes[1] & 0xc0) === 0x80) return true; // fe80::/10 link-local
-		return false;
-	}
-	return true; // not parseable as an IP → block defensively
-}
-
-/** Expand an IPv6 literal (incl. `::` compression and trailing dotted IPv4) to 16 bytes, or null. */
-function ipv6ToBytes(ip: string): number[] | null {
-	const raw = ip.split('%')[0]; // drop any zone id
-	let head = raw;
-	const dotted = raw.match(/(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-	if (dotted) {
-		const v4 = dotted.slice(1).map(Number);
-		if (v4.some((n) => n > 255)) return null;
-		const h1 = ((v4[0] << 8) | v4[1]).toString(16);
-		const h2 = ((v4[2] << 8) | v4[3]).toString(16);
-		head = raw.slice(0, raw.length - dotted[0].length) + h1 + ':' + h2;
-	}
-	const halves = head.split('::');
-	if (halves.length > 2) return null;
-	const left = halves[0] ? halves[0].split(':') : [];
-	const right = halves.length === 2 ? (halves[1] ? halves[1].split(':') : []) : null;
-	let groups: string[];
-	if (right === null) {
-		groups = left;
-	} else {
-		const missing = 8 - (left.length + right.length);
-		if (missing < 0) return null;
-		groups = [...left, ...Array<string>(missing).fill('0'), ...right];
-	}
-	if (groups.length !== 8) return null;
-	const bytes: number[] = [];
-	for (const g of groups) {
-		if (!/^[0-9a-f]{1,4}$/.test(g)) return null;
-		const v = parseInt(g, 16);
-		bytes.push((v >> 8) & 0xff, v & 0xff);
-	}
-	return bytes;
-}
-
-/** True for loopback / private / link-local / CGNAT / unspecified IPv4 addresses. */
-function isBlockedIPv4(ip: string): boolean {
-	const parts = ip.split('.').map((p) => Number(p));
-	if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
-		return true; // malformed → block defensively
-	}
-	const [a, b] = parts;
-	if (a === 0) return true; // 0.0.0.0/8 "this" network
-	if (a === 127) return true; // loopback
-	if (a === 10) return true; // private
-	if (a === 169 && b === 254) return true; // link-local incl. cloud metadata
-	if (a === 172 && b >= 16 && b <= 31) return true; // private
-	if (a === 192 && b === 168) return true; // private
-	if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT (100.64.0.0/10)
-	return false;
-}

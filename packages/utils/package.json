@@ -7,6 +7,10 @@
 		".": {
 			"types": "./src/index.ts",
 			"import": "./dist/index.js"
+		},
+		"./workflow/tool-catalog": {
+			"types": "./src/workflow/tool-catalog.ts",
+			"import": "./dist/workflow/tool-catalog.js"
 		}
 	},
 	"scripts": {

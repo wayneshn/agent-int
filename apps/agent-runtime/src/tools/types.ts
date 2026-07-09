@@ -1,4 +1,5 @@
 import { resolve, sep } from 'path';
+import type { McpServerRuntimeEntry } from '@repo/types';
 import type { ProxyClient } from '../proxy-client.js';
 
 /**
@@ -56,6 +57,36 @@ export interface ToolContext {
 	 * backend independently enforces the allow-list + depth/cycle checks on every call.
 	 */
 	agentMessagingAvailable?: boolean;
+	/**
+	 * Whether the mission tools (mission_update_plan, mission_log, schedule_next_wake,
+	 * mission_complete, report_to_owner, request_approval) should be registered for
+	 * this turn. Set when AgentRuntimeConfig.mission is present — autonomous mission
+	 * wakes AND owner steering chats on a mission thread. The backend authorizes
+	 * every call via the missionId claim in the PROXY_TOKEN.
+	 */
+	missionAvailable?: boolean;
+	/**
+	 * True for autonomous mission wakes (triggerType 'mission'). ask_human is NOT
+	 * registered on these turns — nobody is watching, and its 30-min blocking
+	 * long-poll would waste the wake. Owner steering chats on a mission thread keep
+	 * ask_human (a human IS present) — they have missionAvailable without this flag.
+	 */
+	missionWake?: boolean;
+	/**
+	 * Whether the mission MANAGEMENT tools (list_missions, read_mission,
+	 * create_mission, update_mission, control_mission) should be registered — the
+	 * mission equivalent of the workflow tools. Set for interactive chat turns
+	 * (triggerType 'chat', a human is present to confirm spend), NOT for autonomous
+	 * wakes. Every call is scoped host-side to the token's agent + owner.
+	 */
+	missionManagementAvailable?: boolean;
+	/**
+	 * MCP servers assigned to this agent, each with its ENABLED tool metadata
+	 * (no secrets). Set from AgentRuntimeConfig.mcpServers. createMcpTools builds
+	 * one `mcp__<slug>__<tool>` tool per descriptor; the backend re-checks
+	 * ownership + assignment + tool-enabled on every invocation.
+	 */
+	mcpServers?: McpServerRuntimeEntry[];
 }
 
 /**

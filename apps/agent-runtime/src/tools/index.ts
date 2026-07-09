@@ -20,6 +20,9 @@ import { createSendToAgentTool } from './send-to-agent.js';
 import { createAskAgentTool } from './ask-agent.js';
 import { createBrowserTools } from './browser.js';
 import { createRenderUiTool } from './render-ui.js';
+import { createMissionTools } from './mission.js';
+import { createMissionManagementTools } from './mission-management.js';
+import { createMcpTools } from './mcp.js';
 
 export type { ToolContext } from './types.js';
 export { resolveWorkspacePath } from './types.js';
@@ -53,6 +56,13 @@ export { resolveWorkspacePath } from './types.js';
  * The agent-to-agent tools (list_agents, send_to_agent, ask_agent) are included ONLY
  * when ctx.agentMessagingAvailable is true — i.e. the agent has at least one
  * collaborator in its allow-list. The host re-checks the allow-list on every call.
+ *
+ * The mission tools (mission_update_plan, mission_log, schedule_next_wake,
+ * mission_complete, report_to_owner, request_approval) are included ONLY when
+ * ctx.missionAvailable is true — mission wakes and owner steering chats on a
+ * mission thread. ask_human is SKIPPED on autonomous mission wakes
+ * (ctx.missionWake): nobody is watching, so its blocking long-poll would only
+ * burn the wake; request_approval is the async replacement.
  */
 export function createAgentTools(ctx: Parameters<typeof createCallApiTool>[0]): AgentTool[] {
 	const tools = [
@@ -62,7 +72,7 @@ export function createAgentTools(ctx: Parameters<typeof createCallApiTool>[0]): 
 		createShareFileTool(ctx),
 		createListFilesTool(ctx),
 		createRunTerminalTool(ctx),
-		createAskHumanTool(ctx),
+		...(ctx.missionWake ? [] : [createAskHumanTool(ctx)]),
 		createRunCodeTool(ctx),
 		createMemoryWriteTool(ctx),
 		createMemorySearchTool(ctx),
@@ -81,6 +91,17 @@ export function createAgentTools(ctx: Parameters<typeof createCallApiTool>[0]): 
 	}
 	if (ctx.uiRenderingAvailable) {
 		tools.push(createRenderUiTool(ctx));
+	}
+	if (ctx.missionAvailable) {
+		tools.push(...createMissionTools(ctx));
+	}
+	if (ctx.missionManagementAvailable) {
+		tools.push(...createMissionManagementTools(ctx));
+	}
+	// MCP tools — one namespaced tool per enabled tool on each assigned server.
+	// Registered from config metadata; the host re-checks authorization per call.
+	if (ctx.mcpServers?.length) {
+		tools.push(...createMcpTools(ctx));
 	}
 	return tools;
 }

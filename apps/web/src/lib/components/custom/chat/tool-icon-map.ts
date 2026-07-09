@@ -25,6 +25,14 @@ import LayoutIcon from '@lucide/svelte/icons/layout-template';
 import UsersIcon from '@lucide/svelte/icons/users';
 import SendIcon from '@lucide/svelte/icons/send';
 import MessagesSquareIcon from '@lucide/svelte/icons/messages-square';
+import ClipboardListIcon from '@lucide/svelte/icons/clipboard-list';
+import NotebookPenIcon from '@lucide/svelte/icons/notebook-pen';
+import AlarmClockIcon from '@lucide/svelte/icons/alarm-clock';
+import CircleCheckIcon from '@lucide/svelte/icons/circle-check';
+import MegaphoneIcon from '@lucide/svelte/icons/megaphone';
+import ShieldQuestionIcon from '@lucide/svelte/icons/shield-question';
+import TargetIcon from '@lucide/svelte/icons/target';
+import SlidersHorizontalIcon from '@lucide/svelte/icons/sliders-horizontal';
 
 /**
  * Maps built-in agent tool names to their Lucide icon constructors.
@@ -60,7 +68,20 @@ export const TOOL_ICON_MAP: Record<string, typeof WrenchIcon> = {
 	browser_wait_for: ClockIcon,
 	browser_go_back: ArrowLeftIcon,
 	browser_go_forward: ArrowRightIcon,
-	render_ui: LayoutIcon
+	render_ui: LayoutIcon,
+	// Mission — in-wake operating tools
+	mission_update_plan: ClipboardListIcon,
+	mission_log: NotebookPenIcon,
+	schedule_next_wake: AlarmClockIcon,
+	mission_complete: CircleCheckIcon,
+	report_to_owner: MegaphoneIcon,
+	request_approval: ShieldQuestionIcon,
+	// Mission — management tools (chat)
+	list_missions: TargetIcon,
+	read_mission: FileSearchIcon,
+	create_mission: PlusCircleIcon,
+	update_mission: FilePenIcon,
+	control_mission: SlidersHorizontalIcon
 };
 
 /** Fallback icon when a tool name is not found in TOOL_ICON_MAP */

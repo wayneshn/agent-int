@@ -16,6 +16,7 @@ import type { AgentRuntimeConfig, LlmProxyRequest } from '@repo/types';
 import { logger, resolveProviderApi } from '@repo/utils';
 import { ProxyClient } from './proxy-client.js';
 import { createAgentTools } from './tools/index.js';
+import { mcpToolName } from './tools/mcp.js';
 import { buildSkillsPromptSection, buildMissionPromptSection } from './prompt-sections.js';
 import { recordSkillTraces, type ToolLogEntry } from './skill-trace.js';
 
@@ -435,7 +436,7 @@ export async function runAgent(
 	// MCP tools guidance — only when the agent has assigned MCP servers.
 	if (config.mcpServers?.length) {
 		const serverList = config.mcpServers
-			.map((s) => `- **${s.name}**: ${s.tools.map((t) => `mcp__${s.slug}__${t.name}`).join(', ')}`)
+			.map((s) => `- **${s.name}**: ${s.tools.map((t) => mcpToolName(s.slug, t.name)).join(', ')}`)
 			.join('\n');
 		effectiveSystemPrompt +=
 			`\n\n## Connected MCP Servers\n` +

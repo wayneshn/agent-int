@@ -1,7 +1,5 @@
 import { eq, and, desc } from 'drizzle-orm';
 import { v4 as uuidv4 } from 'uuid';
-import { isIP } from 'net';
-import { lookup as dnsLookup } from 'dns/promises';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import { SSEClientTransport } from '@modelcontextprotocol/sdk/client/sse.js';
@@ -9,6 +7,7 @@ import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { db } from '../db/index.js';
 import { mcpServers, agentMcpServers, agents } from '../db/schema/index.js';
 import { EncryptionService } from './EncryptionService.js';
+import { assertPublicUrl } from '../utils/ssrfGuard.js';
 import { logger } from '../config/logger.js';
 import type {
 	McpServer,
@@ -583,68 +582,4 @@ function connectErrorMessage(transport: McpTransport, err: unknown): string {
 		);
 	}
 	return `${label} connection failed${status ? ` (HTTP ${status})` : ''}: ${raw}`;
-}
-
-// ─── SSRF guard (self-contained; mirrors BrowserService's navigation guard) ────
-
-/**
- * Refuse remote MCP URLs that are non-http(s) or resolve to loopback,
- * link-local, or RFC-1918 private addresses (the classic SSRF targets).
- */
-async function assertPublicUrl(rawUrl: string): Promise<void> {
-	let parsed: URL;
-	try {
-		parsed = new URL(rawUrl);
-	} catch {
-		throw new Error(`"${rawUrl}" is not a valid absolute URL`);
-	}
-	if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
-		throw new Error('Only http and https MCP server URLs are allowed');
-	}
-	const hostname = parsed.hostname.replace(/^\[/, '').replace(/\]$/, '');
-	let addresses: string[];
-	if (isIP(hostname) !== 0) {
-		addresses = [hostname];
-	} else {
-		try {
-			addresses = (await dnsLookup(hostname, { all: true })).map((r) => r.address);
-		} catch {
-			return; // unresolvable — the connection attempt will fail the same way
-		}
-	}
-	for (const addr of addresses) {
-		if (isBlockedAddress(addr)) {
-			throw new Error(
-				`MCP server "${parsed.hostname}" resolves to a private/loopback address (${addr})`,
-			);
-		}
-	}
-}
-
-function isBlockedAddress(ip: string): boolean {
-	const fam = isIP(ip);
-	if (fam === 4) return isBlockedIPv4(ip);
-	if (fam === 6) {
-		const v = ip.toLowerCase();
-		if (v === '::1' || v === '::') return true;
-		if (v.startsWith('fe8') || v.startsWith('fe9') || v.startsWith('fea') || v.startsWith('feb'))
-			return true; // fe80::/10 link-local
-		if (v.startsWith('fc') || v.startsWith('fd')) return true; // fc00::/7 unique-local
-		const mapped = v.match(/::ffff:(\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3})$/);
-		if (mapped) return isBlockedIPv4(mapped[1]);
-		return false;
-	}
-	return true; // unparseable → block defensively
-}
-
-function isBlockedIPv4(ip: string): boolean {
-	const parts = ip.split('.').map(Number);
-	if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return true;
-	const [a, b] = parts;
-	if (a === 0 || a === 10 || a === 127) return true; // this-network, private, loopback
-	if (a === 169 && b === 254) return true; // link-local incl. cloud metadata
-	if (a === 172 && b >= 16 && b <= 31) return true; // 172.16/12 private
-	if (a === 192 && b === 168) return true; // 192.168/16 private
-	if (a === 100 && b >= 64 && b <= 127) return true; // 100.64/10 CGNAT
-	return false;
 }

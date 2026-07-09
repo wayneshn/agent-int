@@ -23,6 +23,9 @@ features:
   - title: 100+ ready-made integrations
     details: Slack, GitHub, Gmail, Notion, Stripe, Home Assistant, and more. Each integration is a credential your agent can use to call the real API on your behalf.
     link: /integrations/
+  - title: Connect any MCP server
+    details: Register a Model Context Protocol server by URL or paste a standard mcpServers config, choose which tools to expose, and attach it to your agents — instant access to the wider MCP ecosystem.
+    link: /guide/mcp-servers
   - title: Long-term memory
     details: Agents store episodic, semantic, procedural, and working memories in a vector database and recall them with semantic search across sessions.
     link: /guide/memory

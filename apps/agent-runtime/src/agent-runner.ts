@@ -106,6 +106,9 @@ export async function runAgent(
 		// Register the mission MANAGEMENT tools (create/list/control) on interactive
 		// chat turns — a human is present to confirm autonomous spend. Not on wakes.
 		missionManagementAvailable: config.triggerType === 'chat',
+		// MCP servers assigned to this agent (enabled tool metadata only). One
+		// namespaced tool is registered per descriptor; execute() proxies to the host.
+		mcpServers: config.mcpServers,
 	});
 
 	// ── streamFn: routes every LLM call through the host proxy ────────────────
@@ -427,6 +430,22 @@ export async function runAgent(
 			`credentials for), tell the user honestly instead of retrying endlessly.\n` +
 			`- Never use the browser to attempt to bypass authentication, scrape at abusive ` +
 			`volume, or perform actions the user did not ask for.`;
+	}
+
+	// MCP tools guidance — only when the agent has assigned MCP servers.
+	if (config.mcpServers?.length) {
+		const serverList = config.mcpServers
+			.map((s) => `- **${s.name}**: ${s.tools.map((t) => `mcp__${s.slug}__${t.name}`).join(', ')}`)
+			.join('\n');
+		effectiveSystemPrompt +=
+			`\n\n## Connected MCP Servers\n` +
+			`You have tools from external Model Context Protocol (MCP) servers. Each tool ` +
+			`is named \`mcp__<server>__<tool>\`. Call them like any other tool; the host ` +
+			`runs them against the connected server and returns the result.\n\n` +
+			`${serverList}\n\n` +
+			`Prefer these purpose-built tools over a generic web fetch when they match the ` +
+			`task. If a tool returns an error, read it and adjust your arguments rather than ` +
+			`retrying the same call.`;
 	}
 
 	// Generative UI guidance — only when the render_ui tool is registered

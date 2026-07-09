@@ -8,7 +8,8 @@ import type {
 	AgentKnowledgeAssignment,
 	CredentialMetadata,
 	CredentialDefinition,
-	LlmProviderConfig
+	LlmProviderConfig,
+	McpServer
 } from '@repo/types';
 
 /**
@@ -31,11 +32,12 @@ export const load: PageServerLoad = async (event) => {
 	// Note: skill catalog is NOT loaded here — the AgentSkillsPanel component
 	// fetches it lazily when the "Add skill" dialog is opened.
 	// The agents list powers the collaborators (agent-to-agent) panel.
-	const [credsRes, defsRes, llmRes, agentsRes] = await Promise.all([
+	const [credsRes, defsRes, llmRes, agentsRes, mcpRes] = await Promise.all([
 		api('/credentials', event),
 		api('/credentials/definitions', event),
 		api('/llm-providers', event),
-		api('/agents', event)
+		api('/agents', event),
+		api('/mcp-servers', event)
 	]);
 
 	let credentials: CredentialMetadata[] = [];
@@ -69,19 +71,28 @@ export const load: PageServerLoad = async (event) => {
 		}));
 	}
 
+	// Owner's MCP servers — powers the agent's MCP assignment panel.
+	let mcpServers: McpServer[] = [];
+	if (mcpRes.ok) {
+		const body = await mcpRes.json();
+		mcpServers = (body.data ?? []) as McpServer[];
+	}
+
 	// Edit mode — additionally fetch agent, assigned skills, evolved skills,
-	// and knowledge assignments
+	// knowledge assignments, and assigned MCP server ids
 	let agent: Agent | null = null;
 	let assignedSkillNames: string[] = [];
 	const evolvedSkills: Record<string, AgentEvolvedSkill> = {};
 	let knowledgeAssignments: AgentKnowledgeAssignment[] = [];
+	let assignedMcpServerIds: string[] = [];
 
 	if (isEditMode) {
-		const [agentRes, agentSkillsRes, evolvedRes, knowledgeRes] = await Promise.all([
+		const [agentRes, agentSkillsRes, evolvedRes, knowledgeRes, mcpAssignRes] = await Promise.all([
 			api(`/agents/${agentId}`, event),
 			api(`/agents/${agentId}/skills`, event),
 			api(`/agents/${agentId}/skills/evolved`, event),
-			api(`/agents/${agentId}/knowledge`, event)
+			api(`/agents/${agentId}/knowledge`, event),
+			api(`/mcp-servers/agent/${agentId}`, event)
 		]);
 
 		if (!agentRes.ok) {
@@ -107,6 +118,11 @@ export const load: PageServerLoad = async (event) => {
 			const body = await knowledgeRes.json();
 			knowledgeAssignments = (body.data ?? []) as AgentKnowledgeAssignment[];
 		}
+
+		if (mcpAssignRes.ok) {
+			const body = await mcpAssignRes.json();
+			assignedMcpServerIds = (body.data ?? []) as string[];
+		}
 	}
 
 	return {
@@ -116,9 +132,11 @@ export const load: PageServerLoad = async (event) => {
 		definitions,
 		llmConfigs,
 		agents,
+		mcpServers,
 		assignedSkillNames,
 		evolvedSkills,
-		knowledgeAssignments
+		knowledgeAssignments,
+		assignedMcpServerIds
 	};
 };
 
@@ -166,6 +184,7 @@ export const actions: Actions = {
 		const allCredentials = formData.get('allCredentials') === 'true';
 		const skillNames = formData.getAll('skillNames') as string[];
 		const knowledgeFileIds = formData.getAll('knowledgeFileIds') as string[];
+		const mcpServerIds = formData.getAll('mcpServerIds') as string[];
 		const allowInternetAccess = formData.get('allowInternetAccess') !== 'false';
 		// Clamp to the same 1–100 range the backend enforces; fall back to 20 on non-numeric input.
 		const rawMaxToolCalls = Number(formData.get('maxToolCallsPerTurn'));
@@ -279,6 +298,13 @@ export const actions: Actions = {
 				})
 			)
 		]);
+
+		// Step 4: Replace MCP server assignments (server-side replace — the backend
+		// filters to owned servers and delete-then-reinserts the junction).
+		await api(`/mcp-servers/agent/${savedAgentId}`, event, {
+			method: 'PUT',
+			body: JSON.stringify({ mcpServerIds })
+		});
 
 		// Redirect to edit mode of the saved agent so the user can see the result
 		redirect(

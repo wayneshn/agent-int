@@ -1,4 +1,5 @@
 import { resolve, sep } from 'path';
+import type { McpServerRuntimeEntry } from '@repo/types';
 import type { ProxyClient } from '../proxy-client.js';
 
 /**
@@ -79,6 +80,13 @@ export interface ToolContext {
 	 * wakes. Every call is scoped host-side to the token's agent + owner.
 	 */
 	missionManagementAvailable?: boolean;
+	/**
+	 * MCP servers assigned to this agent, each with its ENABLED tool metadata
+	 * (no secrets). Set from AgentRuntimeConfig.mcpServers. createMcpTools builds
+	 * one `mcp__<slug>__<tool>` tool per descriptor; the backend re-checks
+	 * ownership + assignment + tool-enabled on every invocation.
+	 */
+	mcpServers?: McpServerRuntimeEntry[];
 }
 
 /**

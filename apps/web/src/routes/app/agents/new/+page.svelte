@@ -16,6 +16,7 @@
 	import AgentCredentialsPanel from '$lib/components/custom/agent-credentials-panel.svelte';
 	import AgentCollaboratorsPanel from '$lib/components/custom/agent-collaborators-panel.svelte';
 	import AgentKnowledgePanel from '$lib/components/custom/knowledge/agent-knowledge-panel.svelte';
+	import AgentMcpPanel from '$lib/components/custom/agent-mcp-panel.svelte';
 	import ChevronLeftIcon from '@lucide/svelte/icons/chevron-left';
 	import BrainIcon from '@lucide/svelte/icons/brain';
 	import type { PageData, ActionData } from './$types';
@@ -81,6 +82,8 @@
 	let selectedKnowledgeFileIds = $state<Set<string>>(
 		new Set((data.knowledgeAssignments ?? []).map((a) => a.knowledgeFileId))
 	);
+	/** MCP server selections — same diff/serialise pattern as credentials */
+	let selectedMcpServerIds = $state<Set<string>>(new Set(data.assignedMcpServerIds ?? []));
 	/** Sandbox internet egress — only enforced when the backend runs the docker driver */
 	let allowInternetAccess = $state(agent?.allowInternetAccess ?? true);
 	/** Max tool calls the agent may make in a single chat turn (1–100, default 20) */
@@ -219,6 +222,10 @@
 	<!-- Knowledge file IDs: one hidden input per selected file -->
 	{#each [...selectedKnowledgeFileIds] as knowledgeFileId (knowledgeFileId)}
 		<input type="hidden" name="knowledgeFileIds" value={knowledgeFileId} />
+	{/each}
+	<!-- MCP server IDs: one hidden input per selected server -->
+	{#each [...selectedMcpServerIds] as mcpServerId (mcpServerId)}
+		<input type="hidden" name="mcpServerIds" value={mcpServerId} />
 	{/each}
 
 	<!-- ── Identity ──────────────────────────────────────────────────────────── -->
@@ -489,6 +496,14 @@
 		agentId={isEditMode ? agent?.id : null}
 		{evolvedSkills}
 	/>
+
+	<!-- ── MCP Servers ───────────────────────────────────────────────────────── -->
+	<!--
+		Checkboxes in the component update `selectedMcpServerIds` (a Set).
+		Hidden inputs above serialise it into repeated `mcpServerIds` form fields;
+		the form action replaces the agent_mcp_servers links on save.
+	-->
+	<AgentMcpPanel bind:selectedMcpServerIds servers={data.mcpServers ?? []} />
 
 	<!-- ── Submit ────────────────────────────────────────────────────────────── -->
 	<Separator />

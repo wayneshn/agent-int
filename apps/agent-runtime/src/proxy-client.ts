@@ -18,6 +18,8 @@ import type {
 	AgentAskResult,
 	BrowserActionRequest,
 	BrowserActionResult,
+	McpCallToolRequest,
+	McpCallToolResult,
 	SkillTraceRequestBody,
 	AgentMemoryEntry,
 	AgentMemorySearchResult,
@@ -665,6 +667,33 @@ export class ProxyClient {
 		};
 		if (!json.success || !json.data) {
 			throw new Error(`Browser action failed: ${json.error ?? 'unknown error'}`);
+		}
+		return json.data;
+	}
+
+	// ─── MCP ──────────────────────────────────────────────────────────────────
+
+	/**
+	 * Invoke one tool on an assigned MCP server via the host. The live connection
+	 * and all secrets stay host-side in McpService; this sandbox only sends the
+	 * server id + tool name + args. Uses the long IO timeout since MCP tools may
+	 * perform slow network work.
+	 */
+	async mcpCallTool(request: McpCallToolRequest): Promise<McpCallToolResult> {
+		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mcp/call-tool`, {
+			method: 'POST',
+			headers: this.authHeaders(),
+			body: JSON.stringify(request),
+			signal: AbortSignal.timeout(IO_TIMEOUT_MS),
+		});
+
+		const json = (await res.json()) as {
+			success: boolean;
+			data?: McpCallToolResult;
+			error?: string;
+		};
+		if (!json.success || !json.data) {
+			throw new Error(`MCP tool call failed: ${json.error ?? 'unknown error'}`);
 		}
 		return json.data;
 	}

@@ -21,6 +21,7 @@ import { WorkflowRunService } from '../services/WorkflowRunService.js';
 import { WorkflowService } from '../services/WorkflowService.js';
 import { SkillService } from '../services/SkillService.js';
 import { BrowserService } from '../services/BrowserService.js';
+import { McpService } from '../services/McpService.js';
 import { MissionService, MISSION_PLAN_MAX_LENGTH } from '../services/MissionService.js';
 import { MissionSchedulerService } from '../services/MissionSchedulerService.js';
 import { OutboundDeliveryService } from '../services/OutboundDeliveryService.js';
@@ -46,6 +47,7 @@ import type {
 	SandboxTokenPayload,
 	HitlRequest,
 	BrowserActionRequest,
+	McpCallToolRequest,
 	MemoryWriteRequest,
 	MemorySearchRequest,
 	MemoryDeleteRequest,
@@ -139,6 +141,7 @@ export function createRuntimeRouter(
 	webAdapter: WebAdapter,
 	skillService: SkillService,
 	browserService: BrowserService,
+	mcpService: McpService,
 	chatFileService: ChatFileService,
 	messagingService: AgentMessagingService,
 	missionService: MissionService,
@@ -459,6 +462,42 @@ export function createRuntimeRouter(
 			logger.warn(
 				{ err, agentId: sandboxToken.agentId, threadId: sandboxToken.threadId },
 				'[runtime] browser action failed',
+			);
+			res.status(400).json({ success: false, error: message });
+		}
+	});
+
+	/**
+	 * POST /v1/runtime/internal/mcp/call-tool
+	 * Invokes one tool on an assigned MCP server on behalf of the sandbox. The
+	 * live connection + secrets live host-side in McpService, which re-checks on
+	 * every call that the server is still owned, enabled, assigned to this agent,
+	 * and that the tool is enabled. agentId/ownerId come from the verified
+	 * PROXY_TOKEN — never from the request body.
+	 */
+	router.post('/internal/mcp/call-tool', async (req: Request, res: Response) => {
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+		const body = req.body as McpCallToolRequest;
+
+		if (!body?.serverId || !body?.toolName) {
+			res.status(400).json({ success: false, error: 'serverId and toolName are required' });
+			return;
+		}
+
+		try {
+			const result = await mcpService.callTool(
+				sandboxToken.ownerId,
+				sandboxToken.agentId,
+				body.serverId,
+				body.toolName,
+				body.args ?? {},
+			);
+			res.json({ success: true, data: result });
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'MCP tool call failed';
+			logger.warn(
+				{ err, agentId: sandboxToken.agentId, serverId: body?.serverId, toolName: body?.toolName },
+				'[runtime] mcp call-tool failed',
 			);
 			res.status(400).json({ success: false, error: message });
 		}

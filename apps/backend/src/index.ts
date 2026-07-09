@@ -6,6 +6,7 @@ import { rateLimiter } from './middleware/auth.js';
 import { errorHandler } from './middleware/errorHandler.js';
 import { healthRouter } from './routes/health.js';
 import { createCredentialsRouter } from './routes/credentials.js';
+import { createMcpServersRouter } from './routes/mcpServers.js';
 import { createOAuth2Router } from './routes/oauth2.js';
 import { createLlmProvidersRouter } from './routes/llmProviders.js';
 import { startModelCatalogRefresh } from './services/llm/modelCatalog.js';
@@ -46,6 +47,7 @@ import { AgentLlmProxyService } from './services/AgentLlmProxyService.js';
 import { AgentRuntimeService } from './services/AgentRuntimeService.js';
 import { AgentMessagingService } from './services/AgentMessagingService.js';
 import { BrowserService } from './services/BrowserService.js';
+import { McpService } from './services/McpService.js';
 import { ChatFileService } from './services/ChatFileService.js';
 import { ProcessDriver } from './services/runtime/ProcessDriver.js';
 import { DockerDriver } from './services/runtime/DockerDriver.js';
@@ -152,6 +154,10 @@ const workflowRunService = new WorkflowRunService();
 // Passed into runtimeService so turn-end (onClose) can close the browser context
 // and persist its storageState; passed into the runtime router for /internal/browser.
 const browserService = new BrowserService(agentService);
+// MCP client — holds the live per-server connection pool (shared with the runtime
+// proxy) and stores encrypted server credentials. Tools reach the sandbox as
+// metadata only; secrets/connections stay host-side.
+const mcpService = new McpService(encryptionService);
 // Chat file uploads + agent-shared files (bytes on the backend-owned host volume).
 const chatFileService = new ChatFileService(agentService, llmProviderService);
 const runtimeService = new AgentRuntimeService(
@@ -167,6 +173,7 @@ const runtimeService = new AgentRuntimeService(
 	browserService,
 	chatFileService,
 	missionService,
+	mcpService,
 );
 
 // Agent-to-agent messaging — authorizes an agent messaging another (collaborator
@@ -333,6 +340,7 @@ app.use(
 		void appTriggerManager.stopByCredential(credentialId);
 	}),
 );
+app.use('/v1/mcp-servers', createMcpServersRouter(authService, mcpService));
 app.use('/v1/oauth2', createOAuth2Router(authService));
 app.use('/v1/llm-providers', createLlmProvidersRouter(authService));
 app.use('/v1/auth', createAuthRouter(authService));
@@ -385,6 +393,7 @@ app.use(
 		webAdapter,
 		skillService,
 		browserService,
+		mcpService,
 		chatFileService,
 		agentMessagingService,
 		missionService,

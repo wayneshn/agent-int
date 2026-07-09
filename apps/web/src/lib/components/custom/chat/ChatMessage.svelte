@@ -9,6 +9,7 @@
 	import OpenUiBlock from './OpenUiBlock.svelte';
 	import { TOOL_ICON_MAP, DEFAULT_TOOL_ICON } from './tool-icon-map.js';
 	import SparklesIcon from '@lucide/svelte/icons/sparkles';
+	import PlugIcon from '@lucide/svelte/icons/plug';
 	import ClipboardListIcon from '@lucide/svelte/icons/clipboard-list';
 	import type { AgentMessage, ChatFile, ContentBlock } from '@repo/types';
 
@@ -170,6 +171,18 @@
 			} catch {
 				// malformed argsJson — fall through to icon
 			}
+		}
+		// MCP tools are named mcp__<server>__<tool> — render a plug icon with a
+		// readable "<server> · <tool>" label instead of the raw snake_case name.
+		if (toolName.startsWith('mcp__')) {
+			const parts = toolName.slice(5).split('__');
+			const server = parts[0] ?? '';
+			const tool = parts.slice(1).join('__') || server;
+			return {
+				type: 'icon',
+				component: PlugIcon,
+				toolDisplayName: server ? `${server} · ${tool}` : tool
+			};
 		}
 		return { type: 'icon', component: TOOL_ICON_MAP[toolName] ?? DEFAULT_TOOL_ICON };
 	}

@@ -234,6 +234,11 @@
 			return [{ label: 'Credentials' }];
 		}
 
+		// ── /app/mcp-servers ──────────────────────────────────────────────────────
+		if (pathname === '/app/mcp-servers') {
+			return [{ label: 'MCP Servers' }];
+		}
+
 		// ── /app/llm-providers ────────────────────────────────────────────────────
 		if (pathname === '/app/llm-providers') {
 			return [{ label: 'LLM Providers' }];

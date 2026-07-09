@@ -25,6 +25,7 @@ import { ChatFileService } from './ChatFileService.js';
 import { WorkflowRunService } from './WorkflowRunService.js';
 import { MissionService } from './MissionService.js';
 import { BrowserService } from './BrowserService.js';
+import { McpService } from './McpService.js';
 import { agentStreamBus } from './AgentStreamBus.js';
 import { logger } from '../config/logger.js';
 import type { ExecutionDriver, RuntimeHandle } from './runtime/ExecutionDriver.js';
@@ -174,7 +175,10 @@ export class AgentRuntimeService {
 	 * once by the runtime's loadConfig() call. One-shot + TTL-bounded so a runtime
 	 * that never starts cannot leak. Assumes a single backend instance (see plan).
 	 */
-	private readonly pendingConfigs = new Map<string, { config: AgentRuntimeConfig; expiresAt: number }>();
+	private readonly pendingConfigs = new Map<
+		string,
+		{ config: AgentRuntimeConfig; expiresAt: number }
+	>();
 
 	/** How long a pending config stays fetchable before it is swept. */
 	private readonly pendingConfigTtlMs = 5 * 60 * 1000;
@@ -211,7 +215,10 @@ export class AgentRuntimeService {
 	 * (concurrency cap, missing model, spawn failure, onClose) settles them. An array
 	 * so multiple waiters on the same thread are all notified.
 	 */
-	private readonly completionWaiters = new Map<string, Array<(status: AgentThreadStatus) => void>>();
+	private readonly completionWaiters = new Map<
+		string,
+		Array<(status: AgentThreadStatus) => void>
+	>();
 
 	constructor(
 		private readonly driver: ExecutionDriver,
@@ -226,6 +233,7 @@ export class AgentRuntimeService {
 		private readonly browserService: BrowserService,
 		private readonly chatFileService: ChatFileService,
 		private readonly missionService: MissionService,
+		private readonly mcpService: McpService,
 	) {
 		// Workspaces base: repo root sibling directory by default.
 		// process.cwd() is apps/backend/ so we go up two levels to reach the monorepo root.
@@ -682,10 +690,7 @@ export class AgentRuntimeService {
 			// suppresses the error toast below — the exit was intentional.
 			const cancelled = this.cancelledThreads.delete(threadId);
 			const status = cancelled ? 'idle' : code === 0 ? 'completed' : 'error';
-			logger.info(
-				{ agentId, threadId, code, status, cancelled },
-				'[runtime] agent runtime exited',
-			);
+			logger.info({ agentId, threadId, code, status, cancelled }, '[runtime] agent runtime exited');
 
 			// Persist any browser session this turn opened (flush history + storageState),
 			// but keep it OPEN across turns of this thread so a follow-up ("now take a
@@ -930,6 +935,19 @@ export class AgentRuntimeService {
 			);
 		}
 
+		// MCP tools — offered only when the agent has internet access. Reads the
+		// enabled tool metadata (no secrets) from each assigned server's cache; the
+		// backend re-checks ownership + assignment + tool-enabled on every call.
+		let mcpServersConfig: AgentRuntimeConfig['mcpServers'];
+		if (agent.allowInternetAccess) {
+			try {
+				const entries = await this.mcpService.getAssignedServerTools(agent.id, ownerId);
+				if (entries.length > 0) mcpServersConfig = entries;
+			} catch (err) {
+				logger.warn({ agentId: agent.id, err }, '[runtime] failed to load MCP tools — omitting');
+			}
+		}
+
 		return {
 			agentId: agent.id,
 			ownerId,
@@ -966,6 +984,10 @@ export class AgentRuntimeService {
 			// collaborator in its allow-list. The authoritative allow-list + depth/cycle
 			// checks run host-side on every A2A call (AgentMessagingService).
 			agentMessagingAvailable: agent.collaboratorIds.length > 0,
+			// MCP servers assigned to this agent (enabled tools only, no secrets).
+			// agent-runner registers one namespaced tool per entry; the backend
+			// re-checks ownership/assignment/tool-enabled on every call.
+			...(mcpServersConfig !== undefined ? { mcpServers: mcpServersConfig } : {}),
 			...(delegationChain !== undefined ? { delegationChain } : {}),
 			// Workflow config — present only for workflow runs. Causes the runtime to route
 			// to workflow-runner.ts rather than agent-runner.ts.

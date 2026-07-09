@@ -22,6 +22,7 @@ import { createBrowserTools } from './browser.js';
 import { createRenderUiTool } from './render-ui.js';
 import { createMissionTools } from './mission.js';
 import { createMissionManagementTools } from './mission-management.js';
+import { createMcpTools } from './mcp.js';
 
 export type { ToolContext } from './types.js';
 export { resolveWorkspacePath } from './types.js';
@@ -96,6 +97,11 @@ export function createAgentTools(ctx: Parameters<typeof createCallApiTool>[0]): 
 	}
 	if (ctx.missionManagementAvailable) {
 		tools.push(...createMissionManagementTools(ctx));
+	}
+	// MCP tools — one namespaced tool per enabled tool on each assigned server.
+	// Registered from config metadata; the host re-checks authorization per call.
+	if (ctx.mcpServers?.length) {
+		tools.push(...createMcpTools(ctx));
 	}
 	return tools;
 }

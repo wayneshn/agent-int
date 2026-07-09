@@ -3,6 +3,7 @@ import type { SkillRuntimeEntry } from './skill.js';
 import type { ChatFile } from './chatFile.js';
 import type { Workflow, WorkflowTriggerContext } from './workflow.js';
 import type { MissionRuntimeInfo, MissionEvent } from './mission.js';
+import type { McpServerRuntimeEntry } from './mcp.js';
 
 // ─── Enum mirrors (TypeScript unions matching the pgEnum values) ──────────────
 
@@ -504,6 +505,14 @@ export interface AgentRuntimeConfig {
 	 * feeds the mission prompt section (goal, plan document, budget, journal).
 	 */
 	mission?: MissionRuntimeInfo;
+	/**
+	 * MCP servers assigned to this agent, each with the ENABLED tool metadata
+	 * (no secrets). agent-runner registers one `mcp__<slug>__<tool>` AgentTool per
+	 * entry, whose execute() proxies to POST /internal/mcp/call-tool. Present only
+	 * when the agent has ≥1 enabled MCP server assigned AND internet access is on.
+	 * The backend re-checks ownership + assignment + tool-enabled on every call.
+	 */
+	mcpServers?: McpServerRuntimeEntry[];
 	/**
 	 * True when this is an interactive chat turn on a mission thread (the owner
 	 * steering the mission between wakes). Mission tools stay available and the

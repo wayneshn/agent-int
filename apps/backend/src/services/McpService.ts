@@ -492,17 +492,26 @@ export class McpService {
 		};
 	}
 
+	/**
+	 * Merge an incoming (possibly redacted) secret blob over the stored one so an
+	 * edit never destroys a secret the client didn't retype. Generic and
+	 * nesting-aware (mirrors CredentialService's unredact, but for MCP's nested
+	 * shape): every MCP_SENTINEL is restored from the matching stored value across
+	 * `headers`, `stdio.env`, and `oauth`; a sentinel with no stored counterpart is
+	 * dropped rather than persisted literally.
+	 *
+	 * Top-level keys the client omits are preserved from `stored` (so editing only
+	 * `headers` leaves `oauth`/`stdio` intact). Inside a nested object the client
+	 * DID send, its key set is authoritative — a header/env var the user removed is
+	 * gone — matching the redacted-form round-trip where every existing key is
+	 * echoed back.
+	 */
 	private unredactData(incoming: McpServerData, stored: McpServerData): McpServerData {
-		const merged: McpServerData = { ...stored, ...incoming };
-		if (incoming.headers) {
-			merged.headers = Object.fromEntries(
-				Object.entries(incoming.headers).map(([k, v]) => [
-					k,
-					v === MCP_SENTINEL ? (stored.headers?.[k] ?? '') : v,
-				]),
-			);
+		const result: Record<string, unknown> = { ...(stored as Record<string, unknown>) };
+		for (const [key, value] of Object.entries(incoming as Record<string, unknown>)) {
+			result[key] = restoreRedactedValue(value, (stored as Record<string, unknown>)[key]);
 		}
-		return merged;
+		return result as McpServerData;
 	}
 
 	private async uniqueSlug(ownerId: string, base: string): Promise<string> {
@@ -518,6 +527,38 @@ export class McpService {
 		}
 		return `${base}-${uuidv4().slice(0, 8)}`;
 	}
+}
+
+// ─── Secret redaction round-trip ────────────────────────────────────────────────
+
+/** True for a non-null, non-array plain object. */
+function isPlainObject(v: unknown): v is Record<string, unknown> {
+	return typeof v === 'object' && v !== null && !Array.isArray(v);
+}
+
+/**
+ * Restore one value from a redacted edit-form submission against its stored
+ * counterpart. A bare MCP_SENTINEL becomes the stored value; a plain object is
+ * rebuilt from the incoming key set (authoritative) with each nested sentinel
+ * restored (and dropped when absent from `stored`); everything else passes
+ * through unchanged. Recurses so `stdio.env` and `oauth` are handled like
+ * `headers`.
+ */
+function restoreRedactedValue(value: unknown, stored: unknown): unknown {
+	if (value === MCP_SENTINEL) return stored;
+	if (isPlainObject(value)) {
+		const storedObj = isPlainObject(stored) ? stored : {};
+		const out: Record<string, unknown> = {};
+		for (const [k, v] of Object.entries(value)) {
+			if (v === MCP_SENTINEL) {
+				if (k in storedObj) out[k] = storedObj[k]; // else drop — no stored secret to restore
+			} else {
+				out[k] = restoreRedactedValue(v, storedObj[k]);
+			}
+		}
+		return out;
+	}
+	return value;
 }
 
 // ─── Connect error formatting ──────────────────────────────────────────────────

@@ -17,6 +17,15 @@ properties:
     type: secret
     required: true
     description: OAuth2 Client Secret from Google Cloud Console
+  - name: scope
+    displayName: Scopes
+    type: string
+    required: true
+    description: >
+      Space-separated list of Google Forms API scopes. The default grants read-only access
+      to form responses (required by the Forms app trigger); adjust it to change the
+      permissions requested.
+    default: 'openid email https://www.googleapis.com/auth/forms.responses.readonly'
 
 oauth2:
   authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -24,7 +33,6 @@ oauth2:
   clientIdProperty: clientId
   clientSecretProperty: clientSecret
   authStyle: inBody
-  scope: 'openid email https://www.googleapis.com/auth/forms.responses.readonly'
   # Google requires these to issue a refresh_token on first authorization
   extraAuthParams:
     access_type: offline

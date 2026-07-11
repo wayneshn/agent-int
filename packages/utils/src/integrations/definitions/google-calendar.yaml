@@ -17,6 +17,15 @@ properties:
     type: secret
     required: true
     description: OAuth2 Client Secret from Google Cloud Console
+  - name: scope
+    displayName: Scopes
+    type: string
+    required: true
+    description: >
+      Space-separated list of Google Calendar API scopes. The default grants full read/write
+      access to calendars and events; trim it to narrow the permissions requested (e.g.
+      https://www.googleapis.com/auth/calendar.readonly for read-only).
+    default: 'openid email https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events'
 
 oauth2:
   authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -24,7 +33,6 @@ oauth2:
   clientIdProperty: clientId
   clientSecretProperty: clientSecret
   authStyle: inBody
-  scope: 'openid email https://www.googleapis.com/auth/calendar https://www.googleapis.com/auth/calendar.events'
   # Google requires these to issue a refresh_token on first authorization
   extraAuthParams:
     access_type: offline

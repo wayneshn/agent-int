@@ -62,7 +62,7 @@ export const agentTriggers = pgTable(
 		 * so the listener and the user never clobber each other.
 		 *
 		 * Shape (AppTriggerState):
-		 *   { cursor?, lastPolledAt?, subscriptionId?, expiresAt?, verificationToken?, baselineHistoryId? }
+		 *   { cursor?, lastPolledAt?, subscriptionId?, expiresAt?, verificationToken?, registeredAt?, ... }
 		 *
 		 * Empty object for non-app triggers.
 		 */

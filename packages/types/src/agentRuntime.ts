@@ -171,11 +171,6 @@ export interface AppTriggerConfig {
 	params: Record<string, unknown>;
 	/** Poll cadence in seconds for poll-mode providers — clamped to the provider's minimum */
 	pollIntervalSec?: number;
-	/**
-	 * Pub/Sub topic name for providers that push via Google Cloud Pub/Sub (Gmail).
-	 * Falls back to the server-configured default topic when omitted.
-	 */
-	pubsubTopic?: string;
 }
 
 /**
@@ -193,8 +188,6 @@ export interface AppTriggerState {
 	expiresAt?: string;
 	/** Verification token captured during a webhook handshake (e.g. Notion) */
 	verificationToken?: string;
-	/** Baseline history id captured at registration (Gmail Pub/Sub history cursor) */
-	baselineHistoryId?: string;
 	/** ISO timestamp of the last successful listener activation / webhook registration */
 	registeredAt?: string;
 	/** Message from the last failed activation / registration (cleared on success) */

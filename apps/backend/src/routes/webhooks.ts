@@ -14,10 +14,11 @@ import { logger } from '../config/logger.js';
  * Two flavours, branched on the trigger kind:
  *   - kind === 'webhook' (generic) — HMAC-SHA256 over the raw body against the stored secret
  *     (unless requireSignature === false). Headers are forwarded into {{trigger.payload}}.
- *   - kind === 'app' — delegated to AppTriggerManager: the matching provider verifies its own
- *     inbound auth (Pub/Sub envelope, Slack signing secret, Notion signature), answers any
- *     verification challenge, and produces the normalized event payload. Raw headers are passed
- *     to the provider (it does NOT leak them into the payload).
+ *   - kind === 'app' — delegated to AppTriggerManager: the matching push provider verifies its
+ *     own inbound auth (Slack signing secret, Notion signature), answers any verification
+ *     challenge, and produces the normalized event payload. Raw headers are passed to the
+ *     provider (it does NOT leak them into the payload). Poll providers (Gmail, Outlook, Forms)
+ *     never hit this route — they call the app's API outbound on a timer.
  *
  * Security:
  *   - No user auth — these endpoints are called by external services

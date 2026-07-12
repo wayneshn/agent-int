@@ -82,6 +82,7 @@ export default defineConfig({
 					items: [
 						{ text: 'Overview', link: '/integrations/triggers/' },
 						{ text: 'Gmail', link: '/integrations/triggers/gmail' },
+						{ text: 'Outlook / Hotmail', link: '/integrations/triggers/outlook' },
 						{ text: 'Google Forms', link: '/integrations/triggers/google-forms' },
 						{ text: 'Notion', link: '/integrations/triggers/notion' },
 						{ text: 'Slack', link: '/integrations/triggers/slack' },

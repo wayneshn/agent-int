@@ -29,9 +29,9 @@ interface FormsResponseList {
 /**
  * Google Forms app trigger — polls the Forms API for new responses.
  *
- * Google Forms has no native push without an Apps Script / Pub/Sub watch (a fast
- * follow on the same Pub/Sub infra as Gmail), so v1 polls `forms.responses.list`
- * filtered by submission time. The cursor is the latest submission timestamp seen.
+ * Google Forms has no simple native push (it would need an Apps Script installable
+ * trigger), so it polls `forms.responses.list` filtered by submission time. The cursor
+ * is the latest submission timestamp seen.
  */
 export class GoogleFormsTriggerProvider implements AppTriggerProvider {
 	readonly id = 'google-forms';

@@ -51,7 +51,7 @@ Each turn is a Node.js child process with a sanitized environment. The no-secret
 - **API keys** — stored as SHA-256 hashes, with mandatory expiry (1–365 days). See [API Keys](/guide/api-keys).
 - **First-run setup** — the bootstrap endpoint creates the first admin and permanently locks itself once any user exists.
 - **Rate limiting** — the API applies a global per-IP rate limit (200 requests / 15 min), excluding streaming, webhook, and internal sandbox endpoints.
-- **Webhooks** — workflow webhook triggers require an HMAC-SHA256 signature; [app triggers](/guide/workflows/triggers#app-event) verify each inbound delivery with the provider's own scheme (Slack signing secret, Notion `X-Notion-Signature`, Gmail Pub/Sub envelope); channel pairing codes are single-use, expire in 10 minutes, and are brute-force rate-limited.
+- **Webhooks** — workflow webhook triggers require an HMAC-SHA256 signature; [app triggers](/guide/workflows/triggers#app-event) either poll the app's API outbound (Gmail, Outlook/Hotmail, Google Forms — no inbound endpoint) or verify each inbound push with the provider's own scheme (Slack signing secret, Notion `X-Notion-Signature`); channel pairing codes are single-use, expire in 10 minutes, and are brute-force rate-limited.
 
 ## Resource guards
 

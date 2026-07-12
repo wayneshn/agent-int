@@ -110,8 +110,8 @@ export interface AppTriggerProviderInfo {
 	/** Events the provider can trigger on */
 	events: AppTriggerEventInfo[];
 	/**
-	 * Optional one-time setup guidance shown in the builder (e.g. Pub/Sub topic
-	 * setup for Gmail, manifest config token for Slack).
+	 * Optional one-time setup guidance shown in the builder (e.g. required scopes for a
+	 * polling provider, manifest config token for Slack).
 	 */
 	setupNote?: string;
 }

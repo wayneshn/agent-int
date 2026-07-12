@@ -59,6 +59,7 @@ The bots understand a common command set:
 | `/sessions`         | List your 10 most recent sessions                         |
 | `/session <number>` | Switch back to a listed session                           |
 | `/status`           | Show the current pairing and session                      |
+| `/compact`          | Summarize and shrink the current session's context        |
 
 ## Channel settings
 

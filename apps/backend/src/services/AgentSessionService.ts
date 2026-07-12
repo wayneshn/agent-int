@@ -1,4 +1,4 @@
-import { eq, and, desc, sql } from 'drizzle-orm';
+import { eq, and, desc, gt, sql } from 'drizzle-orm';
 import { db } from '../db/index.js';
 import { agentThreads, agentMessages, agents } from '../db/schema/index.js';
 import type {
@@ -55,6 +55,8 @@ function rowToThread(row: typeof agentThreads.$inferSelect): AgentThread {
 		triggerId: row.triggerId ?? undefined,
 		triggerPayload: (row.triggerPayload as Record<string, unknown>) ?? undefined,
 		contextTokens: row.contextTokens ?? undefined,
+		contextSummary: row.contextSummary ?? undefined,
+		compactedAt: row.compactedAt ?? undefined,
 		isWorkflowThread: row.isWorkflowThread,
 		isPinned: row.isPinned,
 		initiatorAgentId: row.initiatorAgentId ?? undefined,
@@ -301,6 +303,31 @@ export class AgentSessionService {
 	}
 
 	/**
+	 * Apply a context compaction result to a thread: store the summary, set the
+	 * boundary timestamp, and reset context_tokens to the post-compaction estimate.
+	 * The append-only agent_messages table is left untouched (soft compaction — the
+	 * user's visible scrollback is unaffected). No ownership check — the caller
+	 * (the compact route / channel command) verifies ownership first.
+	 * Returns the updated thread, or null if the thread was not found.
+	 */
+	async applyCompaction(
+		id: string,
+		input: { contextSummary: string; compactedAt: Date; contextTokens: number },
+	): Promise<AgentThread | null> {
+		const rows = await db
+			.update(agentThreads)
+			.set({
+				contextSummary: input.contextSummary,
+				compactedAt: input.compactedAt,
+				contextTokens: input.contextTokens,
+				updatedAt: new Date(),
+			})
+			.where(eq(agentThreads.id, id))
+			.returning();
+		return rows[0] ? rowToThread(rows[0]) : null;
+	}
+
+	/**
 	 * Set or clear the pinned flag for a thread (ownership enforced).
 	 * Returns the updated thread, or null if the thread was not found.
 	 */
@@ -373,6 +400,26 @@ export class AgentSessionService {
 			.select()
 			.from(agentMessages)
 			.where(eq(agentMessages.threadId, threadId))
+			.orderBy(agentMessages.createdAt);
+		return rows.map(rowToMessage);
+	}
+
+	/**
+	 * List a thread's messages created strictly after `since`, oldest first — the
+	 * post-compaction slice of history. When `since` is undefined, returns all
+	 * messages (equivalent to listMessagesInternal). No ownership check — internal
+	 * use only (the runtime's context read and compactThread, both PROXY_TOKEN- or
+	 * owner-scoped by their caller).
+	 */
+	async listMessagesInternalSince(threadId: string, since?: Date): Promise<AgentMessage[]> {
+		const rows = await db
+			.select()
+			.from(agentMessages)
+			.where(
+				since
+					? and(eq(agentMessages.threadId, threadId), gt(agentMessages.createdAt, since))
+					: eq(agentMessages.threadId, threadId),
+			)
 			.orderBy(agentMessages.createdAt);
 		return rows.map(rowToMessage);
 	}

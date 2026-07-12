@@ -6,6 +6,7 @@ import type { CredentialService } from '../../services/CredentialService.js';
 import type { ChannelService } from '../../services/ChannelService.js';
 import type { AgentService } from '../../services/AgentService.js';
 import type { AgentSessionService } from '../../services/AgentSessionService.js';
+import type { AgentLlmProxyService } from '../../services/AgentLlmProxyService.js';
 import type { MessagePipeline } from '../pipeline.js';
 import type { ChatFileService } from '../../services/ChatFileService.js';
 
@@ -34,6 +35,7 @@ export class TelegramPollerManager {
 		private readonly sessionService: AgentSessionService,
 		private readonly pipeline: MessagePipeline,
 		private readonly chatFileService: ChatFileService,
+		private readonly llmProxyService: AgentLlmProxyService,
 	) {}
 
 	/**
@@ -137,6 +139,7 @@ export class TelegramPollerManager {
 				this.agentService,
 				this.sessionService,
 				this.chatFileService,
+				this.llmProxyService,
 			);
 
 			const botApi = adapter.getBotApi();

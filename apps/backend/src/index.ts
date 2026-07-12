@@ -213,6 +213,7 @@ const telegramPollerManager = new TelegramPollerManager(
 	sessionService,
 	messagePipeline,
 	chatFileService,
+	llmProxyService,
 );
 
 // DiscordGatewayManager — starts Gateway WebSocket connections for all active bot credentials.
@@ -224,6 +225,7 @@ const discordGatewayManager = new DiscordGatewayManager(
 	sessionService,
 	messagePipeline,
 	chatFileService,
+	llmProxyService,
 );
 
 // --- Instantiate mission delivery + scheduler ---

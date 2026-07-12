@@ -19,6 +19,7 @@ import { chunkText } from '../text-chunk.js';
 import type { ChannelService } from '../../services/ChannelService.js';
 import type { AgentService } from '../../services/AgentService.js';
 import type { AgentSessionService } from '../../services/AgentSessionService.js';
+import type { AgentLlmProxyService } from '../../services/AgentLlmProxyService.js';
 import {
 	ChatFileService,
 	MAX_CHAT_FILE_BYTES,
@@ -85,6 +86,7 @@ export class DiscordAdapter implements ChannelAdapter {
 		private readonly agentService: AgentService,
 		private readonly sessionService: AgentSessionService,
 		private readonly chatFileService: ChatFileService,
+		private readonly llmProxyService: AgentLlmProxyService,
 		/** Bot application ID — required for editOriginalInteractionResponse on slash commands */
 		private readonly applicationId?: string,
 	) {
@@ -125,6 +127,7 @@ export class DiscordAdapter implements ChannelAdapter {
 				channelService: this.channelService,
 				agentService: this.agentService,
 				sessionService: this.sessionService,
+				llmProxyService: this.llmProxyService,
 				channel: 'discord',
 				externalId: userId,
 				displayName,
@@ -241,6 +244,7 @@ export class DiscordAdapter implements ChannelAdapter {
 			channelService: this.channelService,
 			agentService: this.agentService,
 			sessionService: this.sessionService,
+			llmProxyService: this.llmProxyService,
 			channel: 'discord',
 			externalId: userId,
 			displayName,

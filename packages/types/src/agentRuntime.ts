@@ -35,6 +35,18 @@ export interface AgentThread {
 	 */
 	contextTokens?: number;
 	/**
+	 * Compaction summary of the earlier part of this conversation (soft compaction).
+	 * When present, the agent runtime is fed [this summary] + [messages after
+	 * compactedAt] instead of the full history. Undefined when never compacted.
+	 */
+	contextSummary?: string;
+	/**
+	 * Boundary timestamp for compaction — the createdAt of the newest message folded
+	 * into contextSummary. LLM-facing history includes only messages with
+	 * createdAt > compactedAt. Undefined when never compacted.
+	 */
+	compactedAt?: Date;
+	/**
 	 * True when this thread was created automatically by a workflow execution
 	 * (cron / webhook / manual trigger with a workflowId).
 	 * False for interactive user chat threads.
@@ -694,6 +706,12 @@ export type AgentStreamEvent =
 	 * has been saved to the thread. The frontend should update the sidebar.
 	 */
 	| { type: 'thread_title_updated'; threadId: string; title: string }
+	/**
+	 * Emitted after a thread's context is compacted (via the UI button or the
+	 * /compact channel command). Carries the new post-compaction context-token
+	 * occupancy so an open chat tab can drop its usage bar and refresh history.
+	 */
+	| { type: 'context_compacted'; threadId: string; contextTokens: number }
 	/**
 	 * Emitted on the AgentStreamBus keyed by MISSION id (not thread id) whenever a
 	 * mission journal entry is appended. Powers live updates on the mission detail

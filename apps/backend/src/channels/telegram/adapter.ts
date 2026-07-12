@@ -15,6 +15,7 @@ import { createBatchedSubscriber, type BatchedDelivery } from '../batched-subscr
 import type { ChannelService } from '../../services/ChannelService.js';
 import type { AgentService } from '../../services/AgentService.js';
 import type { AgentSessionService } from '../../services/AgentSessionService.js';
+import type { AgentLlmProxyService } from '../../services/AgentLlmProxyService.js';
 import {
 	ChatFileService,
 	MAX_CHAT_FILE_BYTES,
@@ -52,6 +53,7 @@ export class TelegramAdapter implements ChannelAdapter {
 		private readonly agentService: AgentService,
 		private readonly sessionService: AgentSessionService,
 		private readonly chatFileService: ChatFileService,
+		private readonly llmProxyService: AgentLlmProxyService,
 	) {
 		this.botApi = new TelegramBotApi(botToken);
 	}
@@ -97,6 +99,7 @@ export class TelegramAdapter implements ChannelAdapter {
 				channelService: this.channelService,
 				agentService: this.agentService,
 				sessionService: this.sessionService,
+				llmProxyService: this.llmProxyService,
 				channel: 'telegram',
 				externalId: String(chatId),
 				displayName,

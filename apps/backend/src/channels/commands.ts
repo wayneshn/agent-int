@@ -3,6 +3,7 @@ import type { AgentThread, ChannelLink } from '@repo/types';
 import type { ChannelService } from '../services/ChannelService.js';
 import type { AgentService } from '../services/AgentService.js';
 import type { AgentSessionService } from '../services/AgentSessionService.js';
+import type { AgentLlmProxyService } from '../services/AgentLlmProxyService.js';
 
 // ─── /pair brute-force protection ─────────────────────────────────────────────
 
@@ -90,6 +91,10 @@ export const CHANNEL_COMMANDS: Array<{
 		],
 	},
 	{ command: 'status', description: 'Show current agent, thread mode and settings' },
+	{
+		command: 'compact',
+		description: 'Summarize and shrink the current conversation to free up context',
+	},
 	{ command: 'unpair', description: 'Disconnect this bot from your account' },
 	{ command: 'help', description: 'Show all available commands' },
 ];
@@ -103,6 +108,7 @@ export interface ChannelCommandContext {
 	channelService: ChannelService;
 	agentService: AgentService;
 	sessionService: AgentSessionService;
+	llmProxyService: AgentLlmProxyService;
 	/** Platform channel identifier — 'telegram' | 'whatsapp' | 'discord' */
 	channel: string;
 	/** Platform-specific sender ID (Telegram chat_id, Discord userId, etc.) */
@@ -177,6 +183,10 @@ export async function handleChannelCommand(
 			await cmdStatus(ctx);
 			return true;
 
+		case '/compact':
+			await cmdCompact(ctx);
+			return true;
+
 		default:
 			// Not a system command — pass to the pipeline so the agent can handle it
 			return false;
@@ -195,6 +205,7 @@ async function cmdHelp(ctx: ChannelCommandContext): Promise<void> {
 			'/sessions — List recent sessions for the active agent\n' +
 			'/session <number> — Switch to a previous session\n' +
 			'/status — Show current agent and settings\n' +
+			'/compact — Summarize and shrink the current conversation to free up context\n' +
 			'/unpair — Disconnect this bot from your account\n' +
 			'/help — Show this message\n\n' +
 			'To get started, visit Account → Channels in the web app to generate a pairing code.',
@@ -393,6 +404,40 @@ async function cmdNew(ctx: ChannelCommandContext): Promise<void> {
 	} catch (err) {
 		logger.error({ err }, '[channel-commands] /new failed');
 		await ctx.sendReply('❌ Failed to start new conversation.');
+	}
+}
+
+async function cmdCompact(ctx: ChannelCommandContext): Promise<void> {
+	const link = await ctx.channelService.getLinkByExternalId(ctx.channel, ctx.externalId);
+	if (!link) {
+		await sendPleaseConnect(ctx);
+		return;
+	}
+	if (!link.activeThreadId) {
+		await ctx.sendReply('No active conversation to compact. Send a message or use /new first.');
+		return;
+	}
+
+	try {
+		await ctx.sendReply('⏳ Compacting the conversation…');
+		const updated = await ctx.llmProxyService.compactThread(
+			link.agentId,
+			link.activeThreadId,
+			link.userId,
+		);
+		await ctx.sendReply(
+			`✅ Context compacted. The earlier conversation was summarized` +
+				`${updated.contextTokens ? ` (~${updated.contextTokens} tokens now).` : '.'}`,
+		);
+		logger.info(
+			{ channel: ctx.channel, agentId: link.agentId, threadId: link.activeThreadId },
+			'[channel-commands] compacted context',
+		);
+	} catch (err) {
+		// compactThread throws user-facing messages (running turn, nothing to compact, …)
+		const message = err instanceof Error ? err.message : 'Failed to compact context';
+		logger.warn({ err, channel: ctx.channel }, '[channel-commands] /compact failed');
+		await ctx.sendReply(`❌ ${message}`);
 	}
 }
 

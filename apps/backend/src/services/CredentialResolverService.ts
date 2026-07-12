@@ -5,6 +5,17 @@ import { CredentialService } from './CredentialService.js';
 // Re-export so callers can import these types from this module if needed
 export type { ResolvedCredential, ExecuteRequestOptions };
 
+/**
+ * executeWithCredential options with a body widened to also accept Blob / FormData
+ * (binary and multipart uploads). The shared ExecuteRequestOptions keeps body as a
+ * string so @repo/types stays free of DOM/Node globals; the backend broadens it here.
+ * A plain string body (ExecuteRequestOptions) is assignable to this, so existing
+ * callers are unaffected.
+ */
+export interface ExecuteWithCredentialOptions extends Omit<ExecuteRequestOptions, 'body'> {
+	body?: string | Blob | FormData;
+}
+
 /** Token refresh threshold — refresh proactively if token expires within this many ms */
 const REFRESH_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
 
@@ -55,7 +66,7 @@ export class CredentialResolverService {
 	async executeWithCredential(
 		credentialId: string,
 		ownerId: string,
-		request: ExecuteRequestOptions,
+		request: ExecuteWithCredentialOptions,
 	): Promise<Response> {
 		const { data, definition } = await this.loadCredentialContext(credentialId, ownerId);
 

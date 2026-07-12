@@ -181,6 +181,78 @@ export class AgentProxyService {
 		return sanitized;
 	}
 
+	/** Drop any Content-Type header (case-insensitive) so fetch can set the value itself. */
+	private stripContentType(
+		headers: Record<string, string> | undefined,
+	): Record<string, string> | undefined {
+		if (!headers) return headers;
+		const out: Record<string, string> = {};
+		for (const [key, value] of Object.entries(headers)) {
+			if (key.toLowerCase() === 'content-type') continue;
+			out[key] = value;
+		}
+		return out;
+	}
+
+	/**
+	 * Build the outbound fetch body from a ProxyRequest, decoding binary payloads.
+	 *   - multipart → a FormData (fetch sets the multipart Content-Type + boundary)
+	 *   - bodyEncoding 'base64' → raw bytes (Buffer) so binary survives intact
+	 *   - otherwise → the raw string (or undefined)
+	 */
+	private buildOutboundBody(request: ProxyRequest): {
+		body: string | Blob | FormData | undefined;
+		isMultipart: boolean;
+	} {
+		if (request.multipart && request.multipart.length > 0) {
+			const form = new FormData();
+			for (const part of request.multipart) {
+				if (part.dataBase64 != null) {
+					const bytes = Buffer.from(part.dataBase64, 'base64');
+					const blob = new Blob([bytes], {
+						type: part.contentType ?? 'application/octet-stream',
+					});
+					form.append(part.name, blob, part.filename ?? part.name);
+				} else {
+					form.append(part.name, part.value ?? '');
+				}
+			}
+			return { body: form, isMultipart: true };
+		}
+		if (request.bodyEncoding === 'base64' && request.body != null) {
+			// Wrap the raw bytes in a Blob (a valid BodyInit). The agent-supplied
+			// Content-Type header still wins, so the correct MIME type is sent.
+			return { body: new Blob([Buffer.from(request.body, 'base64')]), isMultipart: false };
+		}
+		return { body: request.body, isMultipart: false };
+	}
+
+	/**
+	 * Read a fetch Response into a ProxyResponse. When the request asked for
+	 * responseEncoding 'base64', the body is read as raw bytes and base64-encoded
+	 * (for binary downloads); otherwise it is read as UTF-8 text.
+	 */
+	private async readResponseBody(
+		request: ProxyRequest,
+		response: Response,
+	): Promise<ProxyResponse> {
+		const headers: Record<string, string> = {};
+		response.headers.forEach((value, key) => {
+			headers[key] = value;
+		});
+		if (request.responseEncoding === 'base64') {
+			const bytes = Buffer.from(await response.arrayBuffer());
+			return {
+				status: response.status,
+				headers,
+				body: bytes.toString('base64'),
+				bodyEncoding: 'base64',
+			};
+		}
+		const body = await response.text();
+		return { status: response.status, headers, body, bodyEncoding: 'text' };
+	}
+
 	// Credential Proxy
 
 	/**
@@ -223,22 +295,22 @@ export class AgentProxyService {
 				targetUrl = urlObj.toString();
 			}
 
+			const outbound = this.buildOutboundBody(request);
+			// For multipart, drop any Content-Type so fetch writes the correct boundary.
+			const headers = outbound.isMultipart
+				? this.stripContentType(sanitizedHeaders)
+				: sanitizedHeaders;
+
 			const fetchOptions: RequestInit = {
 				method: request.method,
-				headers: sanitizedHeaders,
+				headers,
 			};
-			if (request.body) {
-				fetchOptions.body = request.body;
+			if (outbound.body !== undefined) {
+				fetchOptions.body = outbound.body;
 			}
 
 			const response = await fetch(targetUrl, fetchOptions);
-			const body = await response.text();
-			const headers: Record<string, string> = {};
-			response.headers.forEach((value, key) => {
-				headers[key] = value;
-			});
-
-			return { status: response.status, headers, body };
+			return await this.readResponseBody(request, response);
 		}
 
 		// Step 3b — authenticated path: enforce credential allowlist (token-time snapshot).
@@ -300,26 +372,27 @@ export class AgentProxyService {
 			'[proxy] executing authenticated credential proxy request',
 		);
 
-		// Step 4 — execute via resolver (handles OAuth2 refresh, header injection, etc.)
+		// Step 4 — build the outbound body (decode base64 / assemble multipart) and,
+		// for multipart, drop Content-Type so fetch writes the boundary.
+		const outbound = this.buildOutboundBody(request);
+		const headers = outbound.isMultipart
+			? this.stripContentType(sanitizedHeaders)
+			: sanitizedHeaders;
+
+		// Step 5 — execute via resolver (handles OAuth2 refresh, header injection, etc.)
 		const response = await this.credentialResolver.executeWithCredential(
 			request.credentialId,
 			tokenPayload.ownerId,
 			{
 				method: request.method,
 				url: request.url,
-				headers: sanitizedHeaders,
+				headers,
 				qs: request.qs,
-				body: request.body,
+				body: outbound.body,
 			},
 		);
 
-		// Step 5 — collect response
-		const body = await response.text();
-		const headers: Record<string, string> = {};
-		response.headers.forEach((value, key) => {
-			headers[key] = value;
-		});
-
-		return { status: response.status, headers, body };
+		// Step 6 — collect response (text, or base64 bytes for binary downloads)
+		return await this.readResponseBody(request, response);
 	}
 }

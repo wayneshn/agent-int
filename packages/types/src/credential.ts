@@ -159,6 +159,11 @@ export interface ExecuteRequestOptions {
 	headers?: Record<string, string>;
 	/** Additional query string params to append to the URL */
 	qs?: Record<string, string>;
+	/**
+	 * Request body. Typed as string here (this shared type stays DOM/Node-global-free
+	 * so browser-safe packages can consume it). The backend widens it to also accept
+	 * Blob / FormData for binary and multipart uploads — see CredentialResolverService.
+	 */
 	body?: string;
 }
 

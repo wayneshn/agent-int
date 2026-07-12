@@ -21,6 +21,12 @@ export interface ToolContext {
 	 */
 	callApiMaxBodyBytes?: number;
 	/**
+	 * Maximum allowed binary payload in bytes for call_api (bodyFile / multipart files /
+	 * responseFile). Defaults to 25 MB. Kept under the 64 MB internal proxy JSON limit
+	 * to leave room for base64 inflation.
+	 */
+	callApiMaxBinaryBytes?: number;
+	/**
 	 * The agent's UUID. Used by workflow tools to construct frontend URLs
 	 * that point to the agent's workflow and run pages.
 	 */

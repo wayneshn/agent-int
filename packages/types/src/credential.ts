@@ -55,6 +55,24 @@ export interface OAuth2Config {
 	extraAuthParams?: Record<string, string>;
 }
 
+/**
+ * Strong Customer Authentication config — enables a signed 403-challenge retry.
+ * Some APIs (e.g. Wise) protect endpoints by returning 403 with a one-time
+ * challenge token in a response header; the client must RSA-sign that token and
+ * resend the request with the signature. When present and the credential has a
+ * stored private key, the resolver performs this signed retry automatically.
+ */
+export interface ScaConfig {
+	/** Name of the (secret) property holding the PEM-encoded RSA private key. */
+	privateKeyProperty: string;
+	/** Response header carrying the challenge token on a 403. Default 'x-2fa-approval'. */
+	approvalHeader?: string;
+	/** Request header the signature is sent in on retry. Default 'x-signature'. */
+	signatureHeader?: string;
+	/** Node crypto signing algorithm. Default 'RSA-SHA256'. */
+	algorithm?: string;
+}
+
 /** HTTP request mapping — tells the engine where to inject credentials */
 export interface RequestMapping {
 	headers?: Record<string, string>;
@@ -131,6 +149,8 @@ export interface CredentialDefinition {
 	properties: CredentialProperty[];
 	requestMapping?: RequestMapping;
 	oauth2?: OAuth2Config;
+	/** Strong Customer Authentication — signed 403-challenge retry (e.g. Wise). */
+	sca?: ScaConfig;
 	testRequest?: TestRequest;
 }
 

@@ -54,6 +54,23 @@ const oauth2ConfigSchema = z.object({
 	extraAuthParams: z.record(z.string(), z.string()).optional(),
 });
 
+const scaConfigSchema = z.object({
+	/**
+	 * Name of the (secret) property holding the PEM-encoded RSA private key used to
+	 * sign the strong-customer-authentication challenge.
+	 */
+	privateKeyProperty: z.string(),
+	/**
+	 * Response header carrying the one-time challenge token on a 403. Defaults to
+	 * 'x-2fa-approval' (Wise). The value is signed and echoed back on retry.
+	 */
+	approvalHeader: z.string().optional(),
+	/** Request header the signature is sent in on retry. Defaults to 'x-signature'. */
+	signatureHeader: z.string().optional(),
+	/** Node crypto signing algorithm. Defaults to 'RSA-SHA256'. */
+	algorithm: z.string().optional(),
+});
+
 const testRequestSchema = z.object({
 	method: z.enum(['GET', 'POST']),
 	/**
@@ -96,6 +113,12 @@ export const credentialDefinitionSchema = z.object({
 	properties: z.array(credentialPropertySchema),
 	requestMapping: requestMappingSchema.optional(),
 	oauth2: oauth2ConfigSchema.optional(),
+	/**
+	 * Strong Customer Authentication — enables a signed 403-challenge retry.
+	 * When present and the credential has a private key, a 403 carrying the
+	 * approval header is retried with an RSA signature over the challenge token.
+	 */
+	sca: scaConfigSchema.optional(),
 	testRequest: testRequestSchema.optional(),
 });
 

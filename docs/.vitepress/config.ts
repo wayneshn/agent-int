@@ -209,6 +209,7 @@ export default defineConfig({
 						{ text: 'Paddle', link: '/integrations/paddle' },
 						{ text: 'QuickBooks Online', link: '/integrations/quickbooks' },
 						{ text: 'Razorpay', link: '/integrations/razorpay' },
+						{ text: 'Wise', link: '/integrations/wise' },
 						{ text: 'Xero', link: '/integrations/xero' },
 					],
 				},

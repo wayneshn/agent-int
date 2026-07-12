@@ -1,0 +1,59 @@
+id: wise
+name: Wise (API Token)
+brandName: Wise
+type: bearerToken
+icon: /logos/wise.svg
+description: >
+  Connect to the Wise (formerly TransferWise) API using a personal API token, sent as
+  a Bearer token. Supports the Live and Test (Sandbox) environments. Endpoints protected
+  by Strong Customer Authentication are supported when you add an RSA private key.
+documentationUrl: https://docs.wise.com/api-docs
+
+properties:
+  - name: apiToken
+    displayName: API Token
+    type: secret
+    required: true
+    description: >
+      Generate one in your Wise account under Settings > API tokens. The token must
+      match the selected environment (a sandbox token only works with Test).
+  - name: baseUrl
+    displayName: Environment
+    type: options
+    required: true
+    default: https://api.wise.com
+    description: >
+      Choose Live for a normal Wise account, or Test for a Wise sandbox account.
+    options:
+      - name: Live
+        value: https://api.wise.com
+      - name: Test (Sandbox)
+        value: https://api.wise-sandbox.com
+  - name: privateKey
+    displayName: Private Key (SCA)
+    type: secret
+    required: false
+    description: >
+      Optional. PEM-encoded RSA private key used for Strong Customer Authentication.
+      Only needed for live endpoints that return 403 requiring SCA — register the
+      matching public key in Wise under Settings > API tokens > Manage public keys.
+
+# Wise API tokens authenticate with a Bearer header; endpoints are versioned in the URL
+# (/v1, /v2), so no version header is required.
+requestMapping:
+  headers:
+    Authorization: 'Bearer {{properties.apiToken}}'
+
+# Strong Customer Authentication: on a 403 carrying an x-2fa-approval challenge token,
+# the resolver RSA-signs the token with privateKey and retries with an x-signature header.
+sca:
+  privateKeyProperty: privateKey
+
+# Listing profiles is a simple, non-SCA read that validates the token in either
+# environment. The response is an array of profile objects; the first profile's
+# fullName is shown as the connected-account label (falls back to "Connected" if
+# absent). id is always present as a fallback identifier.
+testRequest:
+  method: GET
+  url: '{{properties.baseUrl}}/v2/profiles'
+  accountIdentifierKey: '0.fullName'

@@ -78,6 +78,20 @@ export const agentThreads = pgTable(
 		 */
 		contextTokens: integer('context_tokens'),
 		/**
+		 * Compaction summary — a distilled, plain-text summary of the earlier part of
+		 * this conversation, produced by the "compact context" feature. When present,
+		 * the agent runtime is fed [this summary] + [messages after compactedAt] instead
+		 * of the full history, so context-token occupancy drops. The user's visible
+		 * scrollback in the UI is unaffected (soft compaction). Null when never compacted.
+		 */
+		contextSummary: text('context_summary'),
+		/**
+		 * Boundary timestamp for compaction — set to the createdAt of the newest message
+		 * folded into contextSummary. The LLM-facing history includes only messages with
+		 * createdAt > compactedAt (plus the summary). Null when never compacted.
+		 */
+		compactedAt: timestamp('compacted_at'),
+		/**
 		 * True when this thread was automatically created by a workflow execution
 		 * (cron, webhook, or manual trigger with workflowId set).
 		 * False for user-initiated chat threads.

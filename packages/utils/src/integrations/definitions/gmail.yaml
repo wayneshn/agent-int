@@ -17,6 +17,15 @@ properties:
     type: secret
     required: true
     description: OAuth2 Client Secret from Google Cloud Console
+  - name: scope
+    displayName: Scopes
+    type: string
+    required: true
+    description: >
+      Space-separated list of Gmail API scopes. The default grants full read, send,
+      compose, and manage access; trim it to narrow the permissions requested (e.g.
+      https://www.googleapis.com/auth/gmail.readonly for read-only).
+    default: 'openid email https://mail.google.com/ https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.insert https://www.googleapis.com/auth/gmail.labels https://www.googleapis.com/auth/gmail.modify'
 
 oauth2:
   authorizationUrl: 'https://accounts.google.com/o/oauth2/v2/auth'
@@ -24,7 +33,6 @@ oauth2:
   clientIdProperty: clientId
   clientSecretProperty: clientSecret
   authStyle: inBody
-  scope: 'openid email https://mail.google.com/ https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/gmail.send https://www.googleapis.com/auth/gmail.compose https://www.googleapis.com/auth/gmail.insert https://www.googleapis.com/auth/gmail.labels https://www.googleapis.com/auth/gmail.modify'
   # Google requires these to issue a refresh_token on first authorization
   extraAuthParams:
     access_type: offline

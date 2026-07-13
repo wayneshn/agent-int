@@ -14,9 +14,9 @@ import type {
  *
  * A provider declares exactly one `deliveryMode` and implements the matching
  * method(s):
- *   - 'poll'    → poll()                                   (Google Forms)
+ *   - 'poll'    → poll()                                   (Gmail, Outlook, Google Forms)
  *   - 'webhook' → registerWebhook/renewWebhook/unregisterWebhook + handleWebhook
- *                                                          (Gmail Pub/Sub, Notion, Slack)
+ *                                                          (Notion, Slack)
  *   - 'stream'  → startListening()                         (no v1 provider yet)
  *
  * Uniform data flow: every listening method receives the trigger's current

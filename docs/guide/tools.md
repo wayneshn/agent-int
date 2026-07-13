@@ -10,6 +10,8 @@ Makes an HTTP request to an external service. When the agent passes one of its a
 
 Mid-conversation revocation is enforced: if you detach a credential from an agent while it's running, subsequent calls with it are rejected.
 
+**Binary files.** The agent can upload and download binary data (PDFs, images, archives) by referencing files in its [workspace](#files) — the raw bytes never pass through the model. To upload, it sends a workspace file either as the raw request body or as part of a multipart/form-data request alongside text fields. To download, it saves the response straight to a workspace file instead of reading it as text. This uses the same credential injection as any other call — for example, uploading a generated report to Google Drive or Slack, or fetching a file to process. Uploads and downloads are capped at 25 MB per file.
+
 ## Human interaction
 
 ### `ask_human`

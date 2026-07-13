@@ -1,9 +1,21 @@
+import { createSign } from 'node:crypto';
 import type { CredentialDefinition, ResolvedCredential, ExecuteRequestOptions } from '@repo/types';
 import { getCredentialDefinition } from '@repo/utils';
 import { CredentialService } from './CredentialService.js';
 
 // Re-export so callers can import these types from this module if needed
 export type { ResolvedCredential, ExecuteRequestOptions };
+
+/**
+ * executeWithCredential options with a body widened to also accept Blob / FormData
+ * (binary and multipart uploads). The shared ExecuteRequestOptions keeps body as a
+ * string so @repo/types stays free of DOM/Node globals; the backend broadens it here.
+ * A plain string body (ExecuteRequestOptions) is assignable to this, so existing
+ * callers are unaffected.
+ */
+export interface ExecuteWithCredentialOptions extends Omit<ExecuteRequestOptions, 'body'> {
+	body?: string | Blob | FormData;
+}
 
 /** Token refresh threshold — refresh proactively if token expires within this many ms */
 const REFRESH_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes
@@ -55,7 +67,7 @@ export class CredentialResolverService {
 	async executeWithCredential(
 		credentialId: string,
 		ownerId: string,
-		request: ExecuteRequestOptions,
+		request: ExecuteWithCredentialOptions,
 	): Promise<Response> {
 		const { data, definition } = await this.loadCredentialContext(credentialId, ownerId);
 
@@ -91,7 +103,56 @@ export class CredentialResolverService {
 			});
 		}
 
+		// Strong Customer Authentication — retry once on 403 with an RSA signature.
+		// Some APIs (e.g. Wise) return 403 + a one-time challenge token in a header;
+		// we sign that token with the stored private key and resend.
+		if (firstResponse.status === 403 && definition.sca) {
+			const retried = this.retryWithSca(firstResponse, url, request, mergedHeaders, currentData, definition.sca);
+			if (retried) return retried;
+		}
+
 		return firstResponse;
+	}
+
+	/**
+	 * Perform the SCA signed retry: read the one-time challenge token from the 403
+	 * response header, RSA-sign it with the credential's stored private key, and
+	 * resend the request with the challenge + signature headers added.
+	 *
+	 * Returns the retried Response, or null when the challenge header or private key
+	 * is missing — in which case the original 403 is surfaced to the caller (whose
+	 * error body tells the user to add a key pair).
+	 */
+	private retryWithSca(
+		firstResponse: Response,
+		url: string,
+		request: ExecuteWithCredentialOptions,
+		mergedHeaders: Record<string, string>,
+		data: Record<string, unknown>,
+		sca: NonNullable<CredentialDefinition['sca']>,
+	): Promise<Response> | null {
+		const approvalHeader = sca.approvalHeader ?? 'x-2fa-approval';
+		const signatureHeader = sca.signatureHeader ?? 'x-signature';
+		const token = firstResponse.headers.get(approvalHeader);
+		const privateKey = data[sca.privateKeyProperty];
+		if (!token || typeof privateKey !== 'string' || privateKey.length === 0) {
+			return null;
+		}
+
+		const signer = createSign(sca.algorithm ?? 'RSA-SHA256');
+		signer.update(token);
+		signer.end();
+		const signature = signer.sign(privateKey, 'base64');
+
+		return fetch(url, {
+			method: request.method,
+			headers: {
+				...mergedHeaders,
+				[approvalHeader]: token,
+				[signatureHeader]: signature,
+			},
+			body: request.body,
+		});
 	}
 
 	/**

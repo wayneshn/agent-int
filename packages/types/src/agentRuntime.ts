@@ -35,6 +35,18 @@ export interface AgentThread {
 	 */
 	contextTokens?: number;
 	/**
+	 * Compaction summary of the earlier part of this conversation (soft compaction).
+	 * When present, the agent runtime is fed [this summary] + [messages after
+	 * compactedAt] instead of the full history. Undefined when never compacted.
+	 */
+	contextSummary?: string;
+	/**
+	 * Boundary timestamp for compaction — the createdAt of the newest message folded
+	 * into contextSummary. LLM-facing history includes only messages with
+	 * createdAt > compactedAt. Undefined when never compacted.
+	 */
+	compactedAt?: Date;
+	/**
 	 * True when this thread was created automatically by a workflow execution
 	 * (cron / webhook / manual trigger with a workflowId).
 	 * False for interactive user chat threads.
@@ -159,11 +171,6 @@ export interface AppTriggerConfig {
 	params: Record<string, unknown>;
 	/** Poll cadence in seconds for poll-mode providers — clamped to the provider's minimum */
 	pollIntervalSec?: number;
-	/**
-	 * Pub/Sub topic name for providers that push via Google Cloud Pub/Sub (Gmail).
-	 * Falls back to the server-configured default topic when omitted.
-	 */
-	pubsubTopic?: string;
 }
 
 /**
@@ -181,8 +188,6 @@ export interface AppTriggerState {
 	expiresAt?: string;
 	/** Verification token captured during a webhook handshake (e.g. Notion) */
 	verificationToken?: string;
-	/** Baseline history id captured at registration (Gmail Pub/Sub history cursor) */
-	baselineHistoryId?: string;
 	/** ISO timestamp of the last successful listener activation / webhook registration */
 	registeredAt?: string;
 	/** Message from the last failed activation / registration (cleared on success) */
@@ -255,6 +260,23 @@ export interface AgentTrigger {
  * When `credentialId` is empty or omitted, the host executes the request
  * directly without injecting any authentication. Use this for public APIs.
  */
+/**
+ * One part of a multipart/form-data request body (see ProxyRequest.multipart).
+ * A part is either a plain text field (`value`) or a file part (`dataBase64`).
+ */
+export interface ProxyMultipartPart {
+	/** Form field name */
+	name: string;
+	/** Text field value. Set this XOR dataBase64. */
+	value?: string;
+	/** File part content, base64-encoded. Set this XOR value. */
+	dataBase64?: string;
+	/** File name for a file part (Content-Disposition filename) */
+	filename?: string;
+	/** MIME type for a file part (defaults to application/octet-stream) */
+	contentType?: string;
+}
+
 export interface ProxyRequest {
 	/**
 	 * ID of the credential to use. Must be in the agent's allowed credential list.
@@ -269,14 +291,34 @@ export interface ProxyRequest {
 	qs?: Record<string, string>;
 	/** Request body (raw string — stringify JSON or form data before passing) */
 	body?: string;
+	/**
+	 * Encoding of `body`. 'text' (default) = `body` is sent verbatim. 'base64' =
+	 * `body` is a base64-encoded binary payload; the host decodes it to raw bytes
+	 * before sending, so binary files survive intact. Ignored when `multipart` is set.
+	 */
+	bodyEncoding?: 'text' | 'base64';
+	/**
+	 * multipart/form-data parts. When set, the host builds a FormData request body
+	 * (letting fetch set the Content-Type boundary) — used for file uploads with
+	 * accompanying text fields. Mutually exclusive with `body`.
+	 */
+	multipart?: ProxyMultipartPart[];
+	/**
+	 * How the host should return the response body. 'text' (default) = UTF-8 text.
+	 * 'base64' = the host reads the response as raw bytes and returns them
+	 * base64-encoded (ProxyResponse.bodyEncoding='base64') — for downloading binary.
+	 */
+	responseEncoding?: 'text' | 'base64';
 }
 
 /** Response returned from the credential proxy to the sandbox */
 export interface ProxyResponse {
 	status: number;
 	headers: Record<string, string>;
-	/** Raw response body as a string */
+	/** Response body — a UTF-8 string, or base64 when bodyEncoding is 'base64'. */
 	body: string;
+	/** Encoding of `body`. Absent/'text' = plain text; 'base64' = binary bytes. */
+	bodyEncoding?: 'text' | 'base64';
 }
 
 // ─── LLM Proxy Protocol ───────────────────────────────────────────────────────
@@ -694,6 +736,12 @@ export type AgentStreamEvent =
 	 * has been saved to the thread. The frontend should update the sidebar.
 	 */
 	| { type: 'thread_title_updated'; threadId: string; title: string }
+	/**
+	 * Emitted after a thread's context is compacted (via the UI button or the
+	 * /compact channel command). Carries the new post-compaction context-token
+	 * occupancy so an open chat tab can drop its usage bar and refresh history.
+	 */
+	| { type: 'context_compacted'; threadId: string; contextTokens: number }
 	/**
 	 * Emitted on the AgentStreamBus keyed by MISSION id (not thread id) whenever a
 	 * mission journal entry is appended. Powers live updates on the mission detail

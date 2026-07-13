@@ -88,7 +88,7 @@ The Gmail integration requests full Gmail scopes — an agent holding it can rea
 
 ## App triggers
 
-A Gmail credential can fire a workflow when a **new email arrives** (push via Google Cloud Pub/Sub), and a Google Forms credential can fire one when a **new response is submitted** (polling). The one-time Pub/Sub setup, the form-id and label parameters, and the payload shapes live on the dedicated trigger pages:
+A Gmail credential can fire a workflow when a **new email arrives**, and a Google Forms credential can fire one when a **new response is submitted** — both by polling, so no external setup is required. The label / form-id parameters and payload shapes live on the dedicated trigger pages:
 
-- [Gmail app trigger](/integrations/triggers/gmail) — needs a one-time Pub/Sub topic + push subscription; `gmail.readonly` is enough for the trigger.
+- [Gmail app trigger](/integrations/triggers/gmail) — polls for new mail; `gmail.readonly` is enough for the trigger.
 - [Google Forms app trigger](/integrations/triggers/google-forms) — create the credential like the others above (same OAuth client; **enable the Google Forms API** in Step 2), then point the trigger at a form id.

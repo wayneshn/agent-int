@@ -1,5 +1,6 @@
 import type { AppTriggerProvider } from './AppTriggerProvider.js';
 import { GmailTriggerProvider } from './providers/GmailTriggerProvider.js';
+import { OutlookTriggerProvider } from './providers/OutlookTriggerProvider.js';
 import { NotionTriggerProvider } from './providers/NotionTriggerProvider.js';
 import { SlackTriggerProvider } from './providers/SlackTriggerProvider.js';
 import { GoogleFormsTriggerProvider } from './providers/GoogleFormsTriggerProvider.js';
@@ -15,6 +16,7 @@ export class AppTriggerProviderRegistry {
 	constructor() {
 		const all: AppTriggerProvider[] = [
 			new GmailTriggerProvider(),
+			new OutlookTriggerProvider(),
 			new NotionTriggerProvider(),
 			new SlackTriggerProvider(),
 			new GoogleFormsTriggerProvider(),

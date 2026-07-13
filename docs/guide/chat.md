@@ -11,6 +11,7 @@ Go to **Chat** and pick an agent (each conversation belongs to exactly one agent
 - **New thread** — start a fresh context. The previous thread may be summarized into the agent's [memory](/guide/memory#automatic-summarization) in the background.
 - **Rename** — threads get an auto-generated title after your second message; you can rename them any time from the thread menu.
 - **Pin** — pinned threads sort to the top of the sidebar.
+- **Compact context** — summarize the conversation so far to free up context (see [Compacting context](#compacting-context)).
 - **Delete** — removes the thread and its messages.
 - **Workflow thread filter** — threads created by [workflow runs](/guide/workflows/) are hidden by default; a toggle in the sidebar shows them, marked with a `workflow` badge.
 
@@ -34,6 +35,18 @@ Above the input sits a usage bar (toggleable) showing:
 
 - **Context fill** — how much of the model's context window the conversation currently occupies, based on the actual token counts of the thread and the model's context length from the catalog.
 - **Session cost** — cumulative USD cost of the thread, updated after every turn from the model's per-token pricing.
+
+## Compacting context
+
+A long conversation grows the context sent to the model on every turn — raising cost and eventually filling the model's context window. **Compacting** summarizes the conversation so far and replaces it — *for the model only* — with that summary, so the next turn starts from a much smaller context.
+
+Compaction is **manual and non-destructive**:
+
+- Your visible chat history stays exactly as it was, with a **Context compacted** divider marking the point. Only what the agent receives going forward is shortened to the summary plus anything sent after it.
+- Trigger it from the **Compact** button on the usage bar, or **Compact context** in the thread menu. The context-fill portion of the usage bar drops right away, then grows again as the conversation continues.
+- On [Telegram and Discord](/guide/channels), the `/compact` command does the same for the active session.
+
+The agent keeps working with the summary in place of the earlier turns, so it retains the important facts and decisions without re-reading the whole history. You can't compact while a turn is running — wait for it to finish.
 
 ## Human-in-the-loop (HITL)
 

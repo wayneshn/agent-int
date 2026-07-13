@@ -52,14 +52,14 @@ Runs the workflow when something happens in a connected app — a new Gmail mess
 
 In the trigger card, choose **App event**, then pick:
 
-1. **App** — the provider (Gmail, Notion, Slack, Google Forms).
+1. **App** — the provider (Gmail, Outlook/Hotmail, Google Forms, Notion, Slack).
 2. **Credential** — one of your credentials of the matching type. It authenticates the _listener_, so any credential of the right type works — it need not be attached to this agent.
 3. **Event** — what to fire on (e.g. _New email received_).
-4. **Parameters** — event-specific fields (a Gmail label, a Notion database, a Slack channel, a Google Form id). Where the app supports it these are searchable dropdowns; otherwise you type the id.
+4. **Parameters** — event-specific fields (a Gmail label, an Outlook folder, a Notion database, a Slack channel, a Google Form id). Where the app supports it these are searchable dropdowns; otherwise you type the id.
 
-For **push** apps, save the workflow first — the card then reveals a **delivery URL** to register with the app and shows the registration status. Each event becomes one run.
+**Polling** apps (Gmail, Outlook/Hotmail, Google Forms) need no external setup — just save and enable. For **push** apps (Notion, Slack), save the workflow first — the card then reveals a **delivery URL** to register with the app and shows the registration status. Each event becomes one run.
 
-Per-app setup, payload shapes, and delivery details live in the **[App Triggers reference](/integrations/triggers/)**: [Gmail](/integrations/triggers/gmail), [Notion](/integrations/triggers/notion), [Slack](/integrations/triggers/slack), [Google Forms](/integrations/triggers/google-forms).
+Per-app setup, payload shapes, and delivery details live in the **[App Triggers reference](/integrations/triggers/)**: [Gmail](/integrations/triggers/gmail), [Outlook / Hotmail](/integrations/triggers/outlook), [Google Forms](/integrations/triggers/google-forms), [Notion](/integrations/triggers/notion), [Slack](/integrations/triggers/slack).
 
 ::: warning Auto-disable on repeated failure
 Like cron triggers, an app trigger that fails to listen 5 times in a row (e.g. an expired credential) is automatically disabled. Fix the cause and re-enable the workflow.

@@ -57,6 +57,8 @@ export class AppTriggerManager {
 	private readonly renewalTimers = new Map<string, NodeJS.Timeout>();
 	private readonly streamConns = new Map<string, { stop: () => Promise<void> }>();
 	private readonly failureCounts = new Map<string, number>();
+	/** Trigger ids with a poll currently in flight — prevents overlap when a poll runs longer than the interval. */
+	private readonly pollsInFlight = new Set<string>();
 
 	constructor(
 		private readonly registry: AppTriggerProviderRegistry,
@@ -205,7 +207,13 @@ export class AppTriggerManager {
 		const ctx = this.buildContext(row.config.credentialId, row.ownerId);
 		let result: AppWebhookHandleResult;
 		try {
-			result = await provider.handleWebhook(ctx, row.config.event, row.config.params, row.state, req);
+			result = await provider.handleWebhook(
+				ctx,
+				row.config.event,
+				row.config.params,
+				row.state,
+				req,
+			);
 		} catch (err) {
 			logger.error({ err, triggerId }, '[app-trigger] webhook handler threw');
 			return { status: 500, body: { success: false, error: 'Internal error' } };
@@ -216,7 +224,10 @@ export class AppTriggerManager {
 		}
 
 		if (!result.ok) {
-			logger.warn({ triggerId, provider: provider.id }, '[app-trigger] webhook verification failed');
+			logger.warn(
+				{ triggerId, provider: provider.id },
+				'[app-trigger] webhook verification failed',
+			);
 			return { status: 401, body: { success: false, error: 'Unauthorized' } };
 		}
 
@@ -266,7 +277,10 @@ export class AppTriggerManager {
 		this.pollTimers.set(row.id, timer);
 		// Run an immediate first poll to establish the baseline cursor.
 		void this.runPoll(row.id);
-		logger.info({ triggerId: row.id, provider: provider.id, intervalMs }, '[app-trigger] poll activated');
+		logger.info(
+			{ triggerId: row.id, provider: provider.id, intervalMs },
+			'[app-trigger] poll activated',
+		);
 	}
 
 	private async activateWebhook(row: AppTriggerRow, provider: AppTriggerProvider): Promise<void> {
@@ -292,7 +306,12 @@ export class AppTriggerManager {
 			this.scheduleRenewal(row.id, reg.expiresAt);
 			this.failureCounts.delete(row.id);
 			logger.info(
-				{ triggerId: row.id, provider: provider.id, mode: reg.mode ?? 'auto', expiresAt: reg.expiresAt },
+				{
+					triggerId: row.id,
+					provider: provider.id,
+					mode: reg.mode ?? 'auto',
+					expiresAt: reg.expiresAt,
+				},
 				'[app-trigger] webhook registered',
 			);
 		} catch (err) {
@@ -306,9 +325,14 @@ export class AppTriggerManager {
 		if (!provider.startListening) return;
 		const ctx = this.buildContext(row.config.credentialId, row.ownerId);
 		try {
-			const conn = await provider.startListening(ctx, row.config.event, row.config.params, (event) => {
-				void this.fireEvents(row, [event]);
-			});
+			const conn = await provider.startListening(
+				ctx,
+				row.config.event,
+				row.config.params,
+				(event) => {
+					void this.fireEvents(row, [event]);
+				},
+			);
 			this.streamConns.set(row.id, conn);
 			logger.info({ triggerId: row.id, provider: provider.id }, '[app-trigger] stream connected');
 		} catch (err) {
@@ -331,9 +355,9 @@ export class AppTriggerManager {
 		const conn = this.streamConns.get(triggerId);
 		if (conn) {
 			this.streamConns.delete(triggerId);
-			await conn.stop().catch((err) =>
-				logger.warn({ err, triggerId }, '[app-trigger] stream stop failed'),
-			);
+			await conn
+				.stop()
+				.catch((err) => logger.warn({ err, triggerId }, '[app-trigger] stream stop failed'));
 		}
 	}
 
@@ -359,21 +383,29 @@ export class AppTriggerManager {
 	// ─── Poll + renewal execution ─────────────────────────────────────────
 
 	private async runPoll(triggerId: string): Promise<void> {
-		const row = await this.loadRow(triggerId).catch(() => null);
-		if (!row || !row.isEnabled) return;
-		const provider = this.registry.getById(row.config.provider);
-		if (!provider?.poll) return;
-
+		// Single-flight: if the previous tick's poll is still running (slow API, large batch),
+		// skip this one rather than overlapping — overlap would double-list and re-fire events.
+		if (this.pollsInFlight.has(triggerId)) return;
+		this.pollsInFlight.add(triggerId);
 		try {
-			const ctx = this.buildContext(row.config.credentialId, row.ownerId);
-			const result = await provider.poll(ctx, row.config.event, row.config.params, row.state);
-			if (result.stateUpdate) {
-				await this.persistState(triggerId, result.stateUpdate);
+			const row = await this.loadRow(triggerId).catch(() => null);
+			if (!row || !row.isEnabled) return;
+			const provider = this.registry.getById(row.config.provider);
+			if (!provider?.poll) return;
+
+			try {
+				const ctx = this.buildContext(row.config.credentialId, row.ownerId);
+				const result = await provider.poll(ctx, row.config.event, row.config.params, row.state);
+				if (result.stateUpdate) {
+					await this.persistState(triggerId, result.stateUpdate);
+				}
+				await this.fireEvents(row, result.events);
+				this.failureCounts.delete(triggerId);
+			} catch (err) {
+				await this.recordFailure(triggerId, err);
 			}
-			await this.fireEvents(row, result.events);
-			this.failureCounts.delete(triggerId);
-		} catch (err) {
-			await this.recordFailure(triggerId, err);
+		} finally {
+			this.pollsInFlight.delete(triggerId);
 		}
 	}
 
@@ -384,7 +416,10 @@ export class AppTriggerManager {
 
 		const expiryMs = new Date(expiresAt).getTime();
 		if (Number.isNaN(expiryMs)) return;
-		const delay = Math.min(Math.max(expiryMs - Date.now() - RENEW_LEAD_MS, 1000), MAX_RENEW_DELAY_MS);
+		const delay = Math.min(
+			Math.max(expiryMs - Date.now() - RENEW_LEAD_MS, 1000),
+			MAX_RENEW_DELAY_MS,
+		);
 
 		const timer = setTimeout(() => {
 			void this.renew(triggerId);

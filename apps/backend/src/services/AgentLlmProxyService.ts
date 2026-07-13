@@ -11,7 +11,7 @@ import { MissionService } from './MissionService.js';
 import { resolveAgentModel, type ResolvedAgentModel } from './llm/resolveAgentModel.js';
 import { logger } from '../config/logger.js';
 import { v4 as uuidv4 } from 'uuid';
-import type { ContentBlock, MessageTokenUsage, AgentMessageRole } from '@repo/types';
+import type { ContentBlock, MessageTokenUsage, AgentMessageRole, AgentThread } from '@repo/types';
 
 /**
  * Minimum interval between render_ui_partial snapshots per tool call. The
@@ -494,6 +494,137 @@ export class AgentLlmProxyService {
 			logger.warn({ err, threadId }, '[llm-proxy] thread title generation failed');
 			return null;
 		}
+	}
+
+	/**
+	 * Compact a thread's context (the "compact context" feature). Summarizes the
+	 * conversation so far into a concise plain-text blurb and stores it on the thread
+	 * as `contextSummary` + `compactedAt`, resetting `contextTokens` to the summary's
+	 * size. This is SOFT compaction — the append-only agent_messages history is left
+	 * intact (the user's visible scrollback is unaffected); only the LLM-facing view
+	 * (assembled in the internal messages route) is shortened to [summary] + [messages
+	 * after compactedAt].
+	 *
+	 * Re-compaction folds the previous summary plus any messages since into a new one.
+	 * User-initiated (UI button or /compact channel command), so errors are thrown
+	 * (not swallowed) for the caller to surface.
+	 *
+	 * @throws Error when the thread is not found, is currently running, the agent has
+	 *   no chat model configured, or there is nothing to compact.
+	 */
+	async compactThread(agentId: string, threadId: string, ownerId: string): Promise<AgentThread> {
+		const thread = await this.sessionService.getThreadById(threadId, ownerId);
+		if (!thread || thread.agentId !== agentId) {
+			throw new Error('Thread not found');
+		}
+		if (thread.status === 'running') {
+			throw new Error('Cannot compact while the agent is running — wait for the turn to finish');
+		}
+
+		const agent = await this.agentService.getById(agentId, ownerId);
+		if (!agent?.modelConfigId) {
+			throw new Error('This agent has no chat model configured');
+		}
+
+		// The current effective context = prior summary (if any) + messages since the
+		// last compaction boundary. That is exactly what we re-summarize.
+		const messages = await this.sessionService.listMessagesInternalSince(
+			threadId,
+			thread.compactedAt,
+		);
+		if (messages.length === 0) {
+			throw new Error('Nothing new to compact yet');
+		}
+		// Fold everything up to and including the newest message. Using a real message
+		// timestamp (not a synthetic marker row) avoids adding an empty assistant bubble
+		// to the visible transcript; the LLM-facing read excludes messages <= this.
+		const boundary = messages[messages.length - 1].createdAt;
+		const convo = messages
+			.filter((m) => m.role === 'user' || m.role === 'assistant')
+			.map((m) => {
+				const text = m.content
+					.filter((b): b is Extract<typeof b, { type: 'text' }> => b.type === 'text')
+					.map((b) => b.text)
+					.join(' ')
+					.trim();
+				if (!text) return null;
+				return `${m.role === 'user' ? 'User' : 'Assistant'}: ${text}`;
+			})
+			.filter((line): line is string => line !== null)
+			.join('\n');
+
+		const transcript = thread.contextSummary
+			? `Summary of the earlier part of this conversation:\n${thread.contextSummary}\n\nConversation since then:\n${convo}`
+			: convo;
+
+		if (!transcript.trim()) {
+			throw new Error('Nothing to compact yet');
+		}
+
+		const fakePayload: SandboxTokenPayload = {
+			agentId,
+			ownerId,
+			threadId,
+			credentialIds: [],
+			iat: Math.floor(Date.now() / 1000),
+			exp: Math.floor(Date.now() / 1000) + 120,
+		};
+		const { model, apiKey } = await this.resolveModel(fakePayload);
+
+		const summaryPrompt =
+			`Summarize the conversation below so it can seamlessly continue with the summary standing in for the full history.\n` +
+			`Write a concise but complete plain-text summary that preserves: key facts and data, decisions made, the user's goals/preferences/constraints, open tasks or unanswered questions, and any important context the assistant needs to keep working. ` +
+			`Omit greetings and small talk. Do not add headings, markdown, or commentary — output only the summary text.\n\n` +
+			`Conversation:\n${transcript}`;
+
+		const summaryUserMsg: UserMessage = {
+			role: 'user',
+			content: [{ type: 'text', text: summaryPrompt } as TextContent],
+			timestamp: Date.now(),
+		};
+
+		const response = await complete(
+			model,
+			{
+				systemPrompt:
+					'You are a conversation-summarization assistant. Produce a faithful, self-contained summary in plain text only.',
+				messages: [summaryUserMsg],
+				tools: [],
+			},
+			{ apiKey },
+		);
+
+		const summary = response.content
+			.filter((b): b is { type: 'text'; text: string } => b.type === 'text')
+			.map((b) => b.text)
+			.join('')
+			.trim();
+
+		if (!summary) {
+			throw new Error('Failed to generate a summary');
+		}
+
+		const updated = await this.sessionService.applyCompaction(threadId, {
+			contextSummary: summary,
+			compactedAt: boundary,
+			// The summary's own token count is the new context baseline.
+			contextTokens: response.usage.output,
+		});
+		if (!updated) {
+			throw new Error('Thread not found');
+		}
+
+		this.streamBus.emit(threadId, {
+			type: 'context_compacted',
+			threadId,
+			contextTokens: updated.contextTokens ?? 0,
+		});
+
+		logger.info(
+			{ agentId, threadId, contextTokens: updated.contextTokens, summaryChars: summary.length },
+			'[llm-proxy] thread context compacted',
+		);
+		return updated;
 	}
 
 	/**

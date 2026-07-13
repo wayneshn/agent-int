@@ -5,10 +5,11 @@
 	import * as Table from '$lib/components/ui/table/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { Badge } from '$lib/components/ui/badge/index.js';
-	import McpAddDialog from '$lib/components/custom/mcp/mcp-add-dialog.svelte';
+	import McpServerDialog from '$lib/components/custom/mcp/mcp-server-dialog.svelte';
 	import McpToolsDialog from '$lib/components/custom/mcp/mcp-tools-dialog.svelte';
 	import PlusIcon from '@lucide/svelte/icons/plus';
 	import PlugIcon from '@lucide/svelte/icons/plug';
+	import PencilIcon from '@lucide/svelte/icons/pencil';
 	import SettingsIcon from '@lucide/svelte/icons/settings-2';
 	import Trash2Icon from '@lucide/svelte/icons/trash-2';
 	import { api } from '$lib/api.client.js';
@@ -27,6 +28,18 @@
 	let addDialogOpen = $state(false);
 	function handleCreated(created: McpServer[]) {
 		servers = [...created, ...servers];
+	}
+
+	// ── Edit dialog ───────────────────────────────────────────────────────────
+	let editDialogOpen = $state(false);
+	let editServer = $state<McpServer | null>(null);
+	function openEdit(server: McpServer) {
+		editServer = server;
+		editDialogOpen = true;
+	}
+	function handleEdited(updated: McpServer) {
+		servers = servers.map((s) => (s.id === updated.id ? updated : s));
+		if (activeServer?.id === updated.id) activeServer = updated;
 	}
 
 	// ── Tools dialog ──────────────────────────────────────────────────────────
@@ -164,6 +177,15 @@
 											variant="ghost"
 											size="sm"
 											class="text-muted-foreground"
+											title="Edit server"
+											onclick={() => openEdit(server)}
+										>
+											<PencilIcon class="size-3.5" />
+										</Button>
+										<Button
+											variant="ghost"
+											size="sm"
+											class="text-muted-foreground"
 											title="Manage tools"
 											onclick={() => openTools(server)}
 										>
@@ -189,7 +211,8 @@
 	{/if}
 </div>
 
-<McpAddDialog bind:open={addDialogOpen} onCreated={handleCreated} />
+<McpServerDialog bind:open={addDialogOpen} onCreated={handleCreated} />
+<McpServerDialog bind:open={editDialogOpen} server={editServer} onUpdated={handleEdited} />
 <McpToolsDialog bind:open={toolsDialogOpen} server={activeServer} onUpdated={handleUpdated} />
 
 <!-- ── Delete confirmation ────────────────────────────────────────────────── -->

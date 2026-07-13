@@ -3,6 +3,8 @@
 	import { browser } from '$app/environment';
 	import EyeIcon from '@lucide/svelte/icons/eye';
 	import EyeOffIcon from '@lucide/svelte/icons/eye-off';
+	import FoldVerticalIcon from '@lucide/svelte/icons/fold-vertical';
+	import LoaderIcon from '@lucide/svelte/icons/loader-circle';
 
 	interface Props {
 		/**
@@ -19,9 +21,25 @@
 		sessionCost: number;
 		/** Model's max context window in tokens — null for unknown/custom models */
 		modelContextLength: number | null;
+		/**
+		 * Called when the user clicks "Compact" — summarizes the conversation so far
+		 * and shrinks what the agent receives next turn. Omit to hide the button.
+		 */
+		onCompact?: () => void;
+		/** True while a compaction request is in flight — shows a spinner and disables the button */
+		compacting?: boolean;
+		/** True while the agent is streaming — compaction is disabled mid-turn */
+		streaming?: boolean;
 	}
 
-	let { latestInputTokens, sessionCost, modelContextLength }: Props = $props();
+	let {
+		latestInputTokens,
+		sessionCost,
+		modelContextLength,
+		onCompact,
+		compacting = false,
+		streaming = false,
+	}: Props = $props();
 
 	/** Initialise the store from localStorage on mount (browser only) */
 	$effect(() => {
@@ -90,6 +108,27 @@
 			<!-- Thread cumulative cost (seeded from DB, accumulated live) -->
 			<span class="tabular-nums">{fmtCost(sessionCost)}</span>
 		</div>
+	{/if}
+
+	<!-- Compact context — summarizes the conversation so far to free up context -->
+	{#if onCompact}
+		<button
+			type="button"
+			onclick={() => onCompact?.()}
+			disabled={compacting || streaming || latestInputTokens === 0}
+			class="flex items-center gap-1 text-muted-foreground/60 transition-colors hover:text-muted-foreground disabled:cursor-not-allowed disabled:opacity-40"
+			title={streaming
+				? 'Wait for the agent to finish before compacting'
+				: 'Summarize and shrink this conversation to free up context'}
+			aria-label="Compact context"
+		>
+			{#if compacting}
+				<LoaderIcon class="size-3 animate-spin" />
+			{:else}
+				<FoldVerticalIcon class="size-3" />
+			{/if}
+			<span class="text-xs">{compacting ? 'Compacting…' : 'Compact'}</span>
+		</button>
 	{/if}
 
 	<!-- Toggle button — always visible so users can show/hide -->

@@ -227,7 +227,29 @@ export function createRuntimeRouter(
 			return;
 		}
 
-		const messages = await sessionService.listMessagesInternal(threadId);
+		// Soft compaction: when this thread has been compacted, the runtime is fed only
+		// the messages after the compaction boundary, with the summary prepended as a
+		// synthetic (non-persisted) assistant message. The user's stored/displayed
+		// history is untouched — only this LLM-facing view is shortened.
+		const compactedThread = await sessionService.getThreadByIdInternal(threadId);
+		const messages = await sessionService.listMessagesInternalSince(
+			threadId,
+			compactedThread?.compactedAt,
+		);
+		if (compactedThread?.contextSummary) {
+			messages.unshift({
+				id: '__compaction_summary__',
+				threadId,
+				role: 'assistant',
+				content: [
+					{
+						type: 'text',
+						text: `[Summary of the earlier part of this conversation, which was compacted to save context]\n${compactedThread.contextSummary}`,
+					},
+				],
+				createdAt: compactedThread.compactedAt ?? new Date(),
+			});
+		}
 
 		// Inject file attachments into user messages FOR THE AGENT ONLY. These blocks
 		// (image content + extracted document text + workspace-path notes) are
@@ -796,6 +818,47 @@ export function createRuntimeRouter(
 		} catch (err) {
 			logger.error({ err, agentId, threadId }, '[runtime] failed to cancel turn');
 			res.status(500).json({ success: false, error: 'Failed to stop the agent' });
+		}
+	});
+
+	/**
+	 * POST /v1/runtime/:agentId/threads/:threadId/compact
+	 * Compact the thread's context — summarize the conversation so far and shrink what
+	 * the agent receives on the next turn (soft compaction; visible history is kept).
+	 * Also reachable from external channels via the /compact command.
+	 */
+	router.post('/:agentId/threads/:threadId/compact', auth, async (req: Request, res: Response) => {
+		const { agentId, threadId } = req.params as { agentId: string; threadId: string };
+		const ownerId = req.user?.sub;
+		if (!ownerId) {
+			res.status(401).json({ success: false, error: 'Unauthorized' });
+			return;
+		}
+
+		try {
+			// Ownership + agent-thread cross-check before doing any work.
+			const thread = await sessionService.getThreadById(threadId, ownerId);
+			if (!thread || thread.agentId !== agentId) {
+				res.status(404).json({ success: false, error: 'Thread not found' });
+				return;
+			}
+			if (thread.status === 'running') {
+				res.status(409).json({
+					success: false,
+					error: 'Cannot compact while the agent is running — wait for the turn to finish',
+				});
+				return;
+			}
+
+			const updated = await llmProxyService.compactThread(agentId, threadId, ownerId);
+			const body: AgentThreadResponse = { success: true, data: updated };
+			res.json(body);
+		} catch (err) {
+			// compactThread throws user-facing messages (e.g. "Nothing to compact yet",
+			// "no chat model configured") — surface them so the UI/command can show why.
+			logger.warn({ err, agentId, threadId }, '[runtime] failed to compact thread context');
+			const message = err instanceof Error ? err.message : 'Failed to compact context';
+			res.status(400).json({ success: false, error: message });
 		}
 	});
 

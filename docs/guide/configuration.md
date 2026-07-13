@@ -39,12 +39,6 @@ A global rate limiter is applied per client IP across the API (public status, OA
 | `RATE_LIMIT_WINDOW_MS` | `60000` | Length of the rate-limit window in milliseconds (default 1 minute).                                   |
 | `RATE_LIMIT_MAX`       | `500`   | Maximum requests allowed per window, per IP. Invalid or non-positive values fall back to the default. |
 
-## App triggers
-
-| Variable              | Default | Description                                                                                                                                                                     |
-| --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `GOOGLE_PUBSUB_TOPIC` | —       | Default Google Cloud Pub/Sub topic (`projects/<project>/topics/<topic>`) for the [Gmail app trigger](/integrations/triggers/gmail). Optional — a trigger can set its own topic. |
-
 ## Secrets
 
 Generate each value independently with:

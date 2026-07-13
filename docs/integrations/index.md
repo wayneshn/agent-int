@@ -145,6 +145,7 @@ Some integrations can also **start a [workflow](/guide/workflows/)** when someth
 | [Paddle](/integrations/paddle)             | API key                      |
 | [QuickBooks Online](/integrations/quickbooks) | OAuth2                    |
 | [Razorpay](/integrations/razorpay)         | Key ID + secret (Basic Auth) |
+| [Wise](/integrations/wise)                 | API token                    |
 | [Xero](/integrations/xero)                 | OAuth2                       |
 
 ## Developer & data

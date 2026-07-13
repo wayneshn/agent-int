@@ -19,6 +19,7 @@
 	import * as Dialog from '$lib/components/ui/dialog/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { ScrollArea } from '$lib/components/ui/scroll-area/index.js';
+	import FoldVerticalIcon from '@lucide/svelte/icons/fold-vertical';
 	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte.js';
 	import type { PageData } from './$types';
 	import type {
@@ -65,6 +66,31 @@
 	 * be reduced independently when a future compaction feature is implemented.
 	 */
 	let contextTokens = $state(data.threadContextTokens);
+
+	/**
+	 * ISO timestamp of the last context compaction, or null. Drives the "context
+	 * compacted" divider in the transcript (shown before the first message created
+	 * after this time). Seeded from the thread and updated on compaction.
+	 */
+	let compactedAt = $state<string | null>(
+		data.thread.compactedAt ? new Date(data.thread.compactedAt).toISOString() : null
+	);
+
+	/**
+	 * Id of the newest message at/before the compaction boundary — the "context
+	 * compacted" divider is rendered just after it (so it shows immediately after
+	 * compaction, even before any new message arrives). Null when never compacted.
+	 */
+	let lastCompactedId = $derived.by<string | null>(() => {
+		if (!compactedAt) return null;
+		const boundary = new Date(compactedAt).getTime();
+		let id: string | null = null;
+		for (const m of messages) {
+			if (new Date(m.createdAt).getTime() <= boundary) id = m.id;
+			else break;
+		}
+		return id;
+	});
 
 	/**
 	 * Cumulative cost for this thread in USD.
@@ -192,6 +218,7 @@
 		pendingHitl = null;
 		// Reset session usage stats to the DB values for the new thread
 		contextTokens = data.threadContextTokens;
+		compactedAt = data.thread.compactedAt ? new Date(data.thread.compactedAt).toISOString() : null;
 		sessionCost = data.threadTotalCost;
 		// Sync the breadcrumb title to the loaded thread title
 		activeBreadcrumbThreadTitle.set(data.thread.title ?? null);
@@ -715,6 +742,18 @@
 				break;
 			}
 
+			case 'context_compacted': {
+				// Fired when the thread's context is compacted (e.g. via the /compact
+				// channel command while this tab is open). Drop the usage bar to the new
+				// occupancy and refresh history so the "context compacted" divider appears.
+				if (event.threadId === data.thread.id) {
+					contextTokens = event.contextTokens;
+					compactedAt = new Date().toISOString();
+					void reconcileMessages();
+				}
+				break;
+			}
+
 			case 'done': {
 				isStreaming = false;
 				// Clear any stale 'running' so the button reverts to Send (the row is
@@ -1050,6 +1089,101 @@
 		}
 	}
 
+	/** True while a compaction request is in flight (drives the usage-bar spinner). */
+	let isCompacting = $state(false);
+
+	/**
+	 * Compact the active thread's context: summarize the conversation so far and
+	 * shrink what the agent receives next turn. The visible transcript is preserved;
+	 * a "context compacted" divider marks the boundary. Reuses the same POST route the
+	 * /compact channel command uses.
+	 */
+	async function handleCompact() {
+		if (isCompacting || isStreaming) return;
+		isCompacting = true;
+		try {
+			const res = await api(`/runtime/${data.agent.id}/threads/${data.thread.id}/compact`, {
+				method: 'POST'
+			});
+			const body = await res.json();
+			if (!res.ok || !body.success) {
+				setAlert({
+					type: 'error',
+					title: 'Could not compact',
+					message: body.error ?? 'Failed to compact the conversation.',
+					duration: 5000,
+					show: true
+				});
+				return;
+			}
+			const updated = body.data as { contextTokens?: number; compactedAt?: string };
+			contextTokens = updated.contextTokens ?? 0;
+			compactedAt = updated.compactedAt ? new Date(updated.compactedAt).toISOString() : compactedAt;
+			// Refresh history so the "context compacted" divider appears at the boundary.
+			await reconcileMessages();
+			setAlert({
+				type: 'success',
+				title: 'Context compacted',
+				message: 'The earlier conversation was summarized to free up context.',
+				duration: 4000,
+				show: true
+			});
+		} catch {
+			setAlert({
+				type: 'error',
+				title: 'Could not compact',
+				message: 'An unexpected error occurred.',
+				duration: 5000,
+				show: true
+			});
+		} finally {
+			isCompacting = false;
+		}
+	}
+
+	/**
+	 * Compact a thread chosen from the sidebar menu. When it's the active thread we
+	 * reuse handleCompact() (full live UI refresh); otherwise we call the same route
+	 * and just confirm — the shortened history is picked up when that thread is opened.
+	 */
+	async function handleCompactThread(thread: AgentThread) {
+		if (thread.id === data.thread.id) {
+			await handleCompact();
+			return;
+		}
+		try {
+			const res = await api(`/runtime/${data.agent.id}/threads/${thread.id}/compact`, {
+				method: 'POST'
+			});
+			const body = await res.json();
+			if (!res.ok || !body.success) {
+				setAlert({
+					type: 'error',
+					title: 'Could not compact',
+					message: body.error ?? 'Failed to compact the conversation.',
+					duration: 5000,
+					show: true
+				});
+				return;
+			}
+			setAlert({
+				type: 'success',
+				title: 'Context compacted',
+				message: 'The conversation was summarized to free up context.',
+				duration: 4000,
+				show: true
+			});
+		} catch {
+			setAlert({
+				type: 'error',
+				title: 'Could not compact',
+				message: 'An unexpected error occurred.',
+				duration: 5000,
+				show: true
+			});
+		}
+	}
+
 	/** Delete the targeted thread via DELETE, then navigate away if it was active. */
 	async function handleConfirmDelete() {
 		if (!deleteTarget) return;
@@ -1116,6 +1250,7 @@
 		onRenameThread={handleRenameThread}
 		onDeleteThread={handleDeleteThread}
 		onBrowserSession={handleBrowserSession}
+		onCompactThread={handleCompactThread}
 	/>
 
 	<!-- Right panel: chat area -->
@@ -1154,6 +1289,18 @@
 							onOpenFile={openFile}
 							onUiAction={(text) => handleSend(text)}
 						/>
+						{#if message.id === lastCompactedId}
+							<!-- Marks where the earlier conversation was summarized (soft compaction).
+							     Everything above stays visible but no longer counts toward the agent's context. -->
+							<div class="my-4 flex items-center gap-3 px-4 text-xs text-muted-foreground">
+								<div class="h-px flex-1 bg-border"></div>
+								<span class="flex items-center gap-1.5">
+									<FoldVerticalIcon class="size-3" />
+									Context compacted
+								</span>
+								<div class="h-px flex-1 bg-border"></div>
+							</div>
+						{/if}
 					{/each}
 
 					<!-- HITL prompt — shown when agent is waiting for human input -->
@@ -1197,6 +1344,9 @@
 				latestInputTokens={contextTokens}
 				{sessionCost}
 				modelContextLength={data.modelContextLength}
+				onCompact={handleCompact}
+				compacting={isCompacting}
+				streaming={isStreaming}
 			/>
 			<ChatInput
 				onSend={handleSend}

@@ -32,7 +32,8 @@
 		appParams: Record<string, unknown>;
 		appPollIntervalSec: number | undefined;
 		providers: AppTriggerProviderInfo[];
-		allCredentials: CredentialMetadata[];
+		/** Credentials this agent can use — the app-trigger picker filters these by provider type. */
+		credentials: CredentialMetadata[];
 		webhookSecret: string | null;
 		webhookUrl: string | null;
 		triggerId: string | null;
@@ -50,7 +51,7 @@
 		appParams = $bindable(),
 		appPollIntervalSec = $bindable(),
 		providers,
-		allCredentials,
+		credentials,
 		webhookSecret,
 		webhookUrl,
 		triggerId,
@@ -236,7 +237,7 @@
 	{:else if triggerKind === 'app'}
 		<AppTriggerPicker
 			{providers}
-			credentials={allCredentials}
+			{credentials}
 			bind:provider={appProvider}
 			bind:event={appEvent}
 			bind:credentialId={appCredentialId}

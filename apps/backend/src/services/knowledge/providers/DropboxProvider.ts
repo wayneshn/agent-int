@@ -64,7 +64,7 @@ export class DropboxProvider implements CloudStorageProvider {
 	readonly id = 'dropbox';
 	readonly displayName = 'Dropbox';
 	readonly icon = '/logos/dropbox.svg';
-	readonly compatibleCredentialTypes = ['dropbox-access-token'];
+	readonly compatibleCredentialTypes = ['dropbox-access-token', 'dropbox-oauth2'];
 
 	private resolver: CredentialResolverService;
 

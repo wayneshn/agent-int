@@ -343,7 +343,8 @@ export class TriggerService {
 	async fireManualTrigger(triggerId: string, ownerId: string): Promise<TriggerFireResult> {
 		const trigger = await this.getById(triggerId, ownerId);
 		if (!trigger) throw new TriggerFireError(`Trigger not found: ${triggerId}`, 'not_found');
-		if (!trigger.isEnabled) throw new TriggerFireError(`Trigger ${triggerId} is disabled`, 'disabled');
+		if (!trigger.isEnabled)
+			throw new TriggerFireError(`Trigger ${triggerId} is disabled`, 'disabled');
 		if (trigger.kind !== 'manual')
 			throw new TriggerFireError(`Trigger ${triggerId} is not a manual trigger`, 'wrong_kind');
 
@@ -362,11 +363,37 @@ export class TriggerService {
 	): Promise<TriggerFireResult> {
 		const trigger = await this.getByIdInternal(triggerId);
 		if (!trigger) throw new TriggerFireError(`Trigger not found: ${triggerId}`, 'not_found');
-		if (!trigger.isEnabled) throw new TriggerFireError(`Trigger ${triggerId} is disabled`, 'disabled');
+		if (!trigger.isEnabled)
+			throw new TriggerFireError(`Trigger ${triggerId} is disabled`, 'disabled');
 		if (trigger.kind !== 'app')
 			throw new TriggerFireError(`Trigger ${triggerId} is not an app trigger`, 'wrong_kind');
 
 		return this.fireTrigger(trigger, payload);
+	}
+
+	/**
+	 * Fire a trigger in Test mode from the builder — a real run seeded with a user-supplied or
+	 * fetched payload. Unlike the live fire paths this intentionally:
+	 *   - accepts ANY trigger kind (webhook/manual/cron/app all testable with a chosen payload),
+	 *   - runs even when the workflow is DISABLED (you test before enabling),
+	 *   - marks the run `is_test` (excluded from history) and skips the lastFiredAt bump.
+	 * `testNode` runs ONLY that node using `seededOutputs` from a prior run ("Execute node");
+	 * omit for a full run.
+	 */
+	async fireTestRun(
+		triggerId: string,
+		ownerId: string,
+		payload: Record<string, unknown>,
+		opts: {
+			testNode?: { nodeId: string; seededOutputs: Record<string, Record<string, unknown>> };
+		} = {},
+	): Promise<TriggerFireResult> {
+		const trigger = await this.getById(triggerId, ownerId);
+		if (!trigger) throw new TriggerFireError(`Trigger not found: ${triggerId}`, 'not_found');
+		return this.fireTrigger(trigger, payload, {
+			isTest: true,
+			testNode: opts.testNode,
+		});
 	}
 
 	// ─── Public scheduling helpers ────────────────────────────────────────
@@ -451,6 +478,10 @@ export class TriggerService {
 	private async fireTrigger(
 		trigger: AgentTrigger,
 		payload: Record<string, unknown>,
+		opts: {
+			isTest?: boolean;
+			testNode?: { nodeId: string; seededOutputs: Record<string, Record<string, unknown>> };
+		} = {},
 	): Promise<TriggerFireResult> {
 		logger.info(
 			{
@@ -458,6 +489,7 @@ export class TriggerService {
 				agentId: trigger.agentId,
 				kind: trigger.kind,
 				workflowId: trigger.workflowId ?? null,
+				isTest: opts.isTest ?? false,
 			},
 			'[triggers] firing trigger',
 		);
@@ -474,7 +506,9 @@ export class TriggerService {
 					'not_found',
 				);
 			}
-			if (!workflow.isEnabled) {
+			// Test runs may execute a disabled workflow (that's the point of testing it before
+			// enabling); real fires must not.
+			if (!workflow.isEnabled && !opts.isTest) {
 				throw new TriggerFireError(`Workflow ${trigger.workflowId} is disabled`, 'disabled');
 			}
 
@@ -486,6 +520,7 @@ export class TriggerService {
 				triggerType: trigger.kind,
 				triggerId: trigger.id,
 				triggerPayload: payload,
+				isTest: opts.isTest,
 			});
 
 			// The run row was created with status 'running' — anything that prevents the
@@ -529,6 +564,7 @@ export class TriggerService {
 						runId: run.id,
 						definition: workflow,
 						triggerContext,
+						testNode: opts.testNode,
 					},
 				);
 				if (!spawned) {
@@ -579,11 +615,13 @@ export class TriggerService {
 			result = { runId: null, workflowId: null, threadId: thread.id };
 		}
 
-		// Update lastFiredAt regardless of path
-		await db
-			.update(agentTriggers)
-			.set({ lastFiredAt: new Date(), updatedAt: new Date() })
-			.where(eq(agentTriggers.id, trigger.id));
+		// Update lastFiredAt for real fires only — a test run must not look like a live fire.
+		if (!opts.isTest) {
+			await db
+				.update(agentTriggers)
+				.set({ lastFiredAt: new Date(), updatedAt: new Date() })
+				.where(eq(agentTriggers.id, trigger.id));
+		}
 
 		return result;
 	}

@@ -24,8 +24,21 @@
 	let prompt = $state(condition.prompt ?? '');
 	let filter = $state<FilterValue>(condition.filter ?? { combinator: 'and', conditions: [] });
 
+	// Retry-on-failure. Conditions are retry-then-stop only (no 'continue' — a condition
+	// has two branches with no well-defined fallback target).
+	let errorAction = $state<'stop' | 'retry'>(condition.errorHandling?.action ?? 'stop');
+	let maxRetries = $state(condition.errorHandling?.maxRetries ?? 3);
+
+	const errorActionLabel = $derived(errorAction === 'retry' ? 'Retry' : 'Stop workflow');
+
 	function emit() {
-		onChange({ name, evalMode, prompt, filter });
+		onChange({
+			name,
+			evalMode,
+			prompt,
+			filter,
+			errorHandling: errorAction === 'retry' ? { action: 'retry', maxRetries } : { action: 'stop' }
+		});
 	}
 </script>
 
@@ -88,6 +101,47 @@
 			/>
 		</div>
 	{/if}
+
+	<!-- Error handling -->
+	<div class="space-y-2">
+		<Label>Error handling</Label>
+		<Select.Root
+			type="single"
+			value={errorAction}
+			onValueChange={(v) => {
+				if (v === 'stop' || v === 'retry') {
+					errorAction = v;
+					emit();
+				}
+			}}
+		>
+			<Select.Trigger class="w-full">{errorActionLabel}</Select.Trigger>
+			<Select.Content>
+				<Select.Item value="stop" label="Stop workflow">Stop workflow</Select.Item>
+				<Select.Item value="retry" label="Retry">Retry</Select.Item>
+			</Select.Content>
+		</Select.Root>
+
+		{#if errorAction === 'retry'}
+			<div class="ml-3 space-y-3 border-l-2 border-border pl-4">
+				<div class="space-y-1.5">
+					<Label for="condition-retries">Max retries</Label>
+					<Input
+						id="condition-retries"
+						type="number"
+						min={1}
+						max={10}
+						bind:value={maxRetries}
+						oninput={emit}
+						class="w-24"
+					/>
+					<p class="text-xs text-muted-foreground">
+						Re-evaluate the condition up to this many times; if it still fails, the workflow stops.
+					</p>
+				</div>
+			</div>
+		{/if}
+	</div>
 
 	<p class="text-xs text-muted-foreground">
 		When this is true, the flow follows the <span class="font-medium">true</span> output; otherwise

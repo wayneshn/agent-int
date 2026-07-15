@@ -40,6 +40,7 @@ import type {
 	UpdateMissionRequest,
 	MissionControlAction,
 } from '@repo/types';
+import { logger } from '@repo/utils';
 
 // Per-call request timeouts. Without them, an unreachable backend (e.g. a runtime
 // container that cannot resolve PROXY_HOST in a misconfigured Docker deployment)
@@ -49,6 +50,7 @@ import type {
 // completion and the credential-proxied external API). Both overridable via env.
 const CONTROL_TIMEOUT_MS = parseInt(process.env.RUNTIME_PROXY_CONTROL_TIMEOUT_MS ?? '120000', 10);
 const IO_TIMEOUT_MS = parseInt(process.env.RUNTIME_PROXY_IO_TIMEOUT_MS ?? '600000', 10);
+const HITL_TIMEOUT_MS = 35 * 60 * 1000;
 
 // ask_agent polling cadence and overall deadline. The deadline sits slightly above
 // the host's 20-min ask window (AGENT_MESSAGE_ASK_TIMEOUT_MS) so the host's own
@@ -62,9 +64,12 @@ const ASK_OVERALL_TIMEOUT_MS = parseInt(
 /**
  * HTTP client for communication between the agent sandbox and the host backend.
  *
- * All requests are authenticated with the PROXY_TOKEN — a short-lived JWT scoped
- * to this agent/thread/credential-set. The token is never persisted; it is passed
- * in as a constructor argument from the environment at container startup.
+ * All requests are authenticated with the PROXY_TOKEN — a short-lived (15-min) JWT
+ * scoped to this agent/thread/credential-set, passed in from the environment at
+ * container startup. Because long runs (especially workflows) outlive that window,
+ * the sandbox is also given a longer-lived refresh token: every request goes through
+ * authedFetch(), which on a 401 exchanges the refresh token for a fresh access token
+ * (POST /v1/runtime/refresh-token) and retries once. See AgentProxyService.
  *
  * Endpoints used:
  *   POST /v1/runtime/internal/proxy                  — credential API proxy
@@ -77,15 +82,20 @@ const ASK_OVERALL_TIMEOUT_MS = parseInt(
  *   POST /v1/runtime/internal/workflow/step-start    — log workflow step start
  *   POST /v1/runtime/internal/workflow/step-end      — log workflow step completion
  *   POST /v1/runtime/internal/workflow/run-complete  — mark workflow run complete
+ *   POST /v1/runtime/refresh-token                   — exchange refresh token for a fresh access token
  */
 export class ProxyClient {
 	private readonly baseUrl: string;
-	private readonly proxyToken: string;
+	private proxyToken: string;
+	private readonly refreshToken?: string;
 	private readonly threadId: string;
+	/** Single-flight guard so concurrent 401s trigger at most one refresh. */
+	private refreshInFlight?: Promise<void>;
 
-	constructor(proxyHost: string, proxyToken: string, threadId: string) {
+	constructor(proxyHost: string, proxyToken: string, threadId: string, refreshToken?: string) {
 		this.baseUrl = proxyHost;
 		this.proxyToken = proxyToken;
+		this.refreshToken = refreshToken;
 		this.threadId = threadId;
 	}
 
@@ -98,6 +108,62 @@ export class ProxyClient {
 		};
 	}
 
+	/**
+	 * Perform an authenticated request to the host, injecting the current access
+	 * token and a per-attempt timeout. On a 401 (expired/invalid access token) and
+	 * when a refresh token is available, exchange it for a fresh access token and
+	 * retry the request exactly once. This is why long/workflow runs survive the
+	 * 15-minute access-token TTL. The caller is responsible for parsing the body.
+	 */
+	private async authedFetch(url: string, init: RequestInit, timeoutMs: number): Promise<Response> {
+		const attempt = (): Promise<Response> =>
+			fetch(url, {
+				...init,
+				headers: { ...this.authHeaders(), ...(init.headers as Record<string, string>) },
+				signal: AbortSignal.timeout(timeoutMs),
+			});
+
+		let res = await attempt();
+		if (res.status === 401 && this.refreshToken) {
+			await this.refreshAccessToken();
+			res = await attempt();
+		}
+		return res;
+	}
+
+	/**
+	 * Exchange the refresh token for a fresh access token and swap it in. Guarded by
+	 * a shared in-flight promise so that a burst of concurrent 401s (e.g. parallel
+	 * workflow calls straddling expiry) performs a single refresh. Throws if the
+	 * refresh token is itself invalid/expired — the run has exceeded its lifetime.
+	 */
+	private async refreshAccessToken(): Promise<void> {
+		if (!this.refreshInFlight) {
+			this.refreshInFlight = (async () => {
+				const res = await fetch(`${this.baseUrl}/v1/runtime/refresh-token`, {
+					method: 'POST',
+					headers: {
+						Authorization: `Bearer ${this.refreshToken}`,
+						'Content-Type': 'application/json',
+					},
+					signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
+				});
+				const json = (await res.json()) as {
+					success: boolean;
+					data?: { proxyToken: string };
+					error?: string;
+				};
+				if (!json.success || !json.data) {
+					throw new Error(`Token refresh failed: ${json.error ?? 'unknown error'}`);
+				}
+				this.proxyToken = json.data.proxyToken;
+			})().finally(() => {
+				this.refreshInFlight = undefined;
+			});
+		}
+		await this.refreshInFlight;
+	}
+
 	// ─── Credential proxy ─────────────────────────────────────────────────────
 
 	/**
@@ -106,12 +172,11 @@ export class ProxyClient {
 	 * the response. Raw credential values never enter this process.
 	 */
 	async proxy(request: ProxyRequest): Promise<ProxyResponse> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/proxy`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(request),
-			signal: AbortSignal.timeout(IO_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/proxy`,
+			{ method: 'POST', body: JSON.stringify(request) },
+			IO_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as { success: boolean; data?: ProxyResponse; error?: string };
 		if (!json.success || !json.data) {
@@ -128,32 +193,64 @@ export class ProxyClient {
 	 * the browser, persists the assistant message, and returns the content blocks
 	 * so the agent loop can continue its tool execution cycle.
 	 */
-	async llmStream(request: LlmProxyRequest): Promise<ContentBlock[]> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/llm/stream`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(request),
-			signal: AbortSignal.timeout(IO_TIMEOUT_MS),
-		});
+	async llmStream(
+		request: LlmProxyRequest,
+	): Promise<{ content: ContentBlock[]; stopReason?: string }> {
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/llm/stream`,
+			{ method: 'POST', body: JSON.stringify(request) },
+			IO_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
-			data?: { content: ContentBlock[] };
+			data?: { content: ContentBlock[]; stopReason?: string };
 			error?: string;
 		};
 		if (!json.success || !json.data) {
 			throw new Error(`LLM proxy failed: ${json.error ?? 'unknown error'}`);
 		}
-		return json.data.content;
+		// Surface a non-normal stop reason (e.g. 'length' truncation) in the logs. The
+		// caller (createProxyStreamFn) also uses it to fail a turn whose tool call was
+		// truncated mid-arguments, rather than executing a partial call.
+		if (json.data.stopReason && json.data.stopReason !== 'stop') {
+			logger.debug(
+				{ stopReason: json.data.stopReason, contentBlocks: json.data.content.length },
+				'[proxy-client] LLM stream ended with a non-normal stop reason',
+			);
+		}
+		return { content: json.data.content, stopReason: json.data.stopReason };
+	}
+
+	/**
+	 * Persist a synthetic assistant text message and stream it to the browser.
+	 *
+	 * This is the ONLY assistant-role write available to the sandbox. It is used by the
+	 * conclusion backstop: when a turn ends with no model text even after a forced retry, the
+	 * runtime writes a short closing note here so the turn always ends with a visible bubble,
+	 * then exits non-zero so the turn is also flagged as failed.
+	 */
+	async appendAssistantNote(text: string): Promise<void> {
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/thread/${this.threadId}/assistant-note`,
+			{ method: 'POST', body: JSON.stringify({ text }) },
+			CONTROL_TIMEOUT_MS,
+		);
+
+		const json = (await res.json()) as { success: boolean; error?: string };
+		if (!json.success) {
+			throw new Error(`Append assistant note failed: ${json.error ?? 'unknown error'}`);
+		}
 	}
 
 	// ─── Message history ─────────────────────────────────────────────────────
 
 	/** Load the full conversation history for this thread */
 	async loadMessages(): Promise<AgentMessage[]> {
-		const res = await fetch(
+		const res = await this.authedFetch(
 			`${this.baseUrl}/v1/runtime/internal/thread/${this.threadId}/messages`,
-			{ headers: this.authHeaders(), signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS) },
+			{},
+			CONTROL_TIMEOUT_MS,
 		);
 
 		const json = (await res.json()) as {
@@ -173,19 +270,18 @@ export class ProxyClient {
 		toolName: string;
 		content: ContentBlock[];
 	}): Promise<void> {
-		const res = await fetch(
+		const res = await this.authedFetch(
 			`${this.baseUrl}/v1/runtime/internal/thread/${this.threadId}/messages`,
 			{
 				method: 'POST',
-				headers: this.authHeaders(),
 				body: JSON.stringify({
 					role: 'tool_result',
 					content: input.content,
 					toolCallId: input.toolCallId,
 					toolName: input.toolName,
 				}),
-				signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
 			},
+			CONTROL_TIMEOUT_MS,
 		);
 
 		const json = (await res.json()) as { success: boolean; error?: string };
@@ -207,12 +303,11 @@ export class ProxyClient {
 	 * HITL window to avoid a Node fetch timeout racing the backend reject.
 	 */
 	async hitlRequest(request: HitlRequest): Promise<HitlResponse> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/hitl/request`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(request),
-			signal: AbortSignal.timeout(35 * 60 * 1000),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/hitl/request`,
+			{ method: 'POST', body: JSON.stringify(request) },
+			HITL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -238,12 +333,11 @@ export class ProxyClient {
 	 * write to another agent's memory.
 	 */
 	async memoryWrite(request: MemoryWriteRequest): Promise<AgentMemoryEntry> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/memory/write`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(request),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/memory/write`,
+			{ method: 'POST', body: JSON.stringify(request) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -263,12 +357,11 @@ export class ProxyClient {
 	 * ranked by cosine similarity. The sandbox cannot access another agent's memory.
 	 */
 	async memorySearch(request: MemorySearchRequest): Promise<AgentMemorySearchResult[]> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/memory/search`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(request),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/memory/search`,
+			{ method: 'POST', body: JSON.stringify(request) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -290,12 +383,11 @@ export class ProxyClient {
 	 * @returns { deletedCount } — number of rows actually removed.
 	 */
 	async memoryDelete(request: MemoryDeleteRequest): Promise<MemoryDeleteResponse> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/memory/delete`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(request),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/memory/delete`,
+			{ method: 'POST', body: JSON.stringify(request) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -316,12 +408,11 @@ export class ProxyClient {
 	 * skill is actually assigned to this agent.
 	 */
 	async recordSkillTrace(request: SkillTraceRequestBody): Promise<void> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/skills/trace`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(request),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/skills/trace`,
+			{ method: 'POST', body: JSON.stringify(request) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as { success: boolean; error?: string };
 		if (!json.success) {
@@ -343,12 +434,11 @@ export class ProxyClient {
 		inputContext: Record<string, unknown>;
 		attemptNumber?: number;
 	}): Promise<string> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/workflow/step-start`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/workflow/step-start`,
+			{ method: 'POST', body: JSON.stringify(input) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -370,12 +460,11 @@ export class ProxyClient {
 		outputData?: Record<string, unknown>;
 		error?: string;
 	}): Promise<void> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/workflow/step-end`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/workflow/step-end`,
+			{ method: 'POST', body: JSON.stringify(input) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as { success: boolean; error?: string };
 		if (!json.success) {
@@ -392,12 +481,11 @@ export class ProxyClient {
 		status: WorkflowRunStatus;
 		error?: string;
 	}): Promise<void> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/workflow/run-complete`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/workflow/run-complete`,
+			{ method: 'POST', body: JSON.stringify(input) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as { success: boolean; error?: string };
 		if (!json.success) {
@@ -412,10 +500,11 @@ export class ProxyClient {
 	 * The host scopes the query to sandboxToken.agentId.
 	 */
 	async listWorkflows(): Promise<WorkflowSummary[]> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/workflow/list`, {
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/workflow/list`,
+			{},
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -433,10 +522,11 @@ export class ProxyClient {
 	 * Only workflows belonging to this agent are accessible.
 	 */
 	async readWorkflow(workflowId: string): Promise<Workflow> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/workflow/${workflowId}`, {
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/workflow/${workflowId}`,
+			{},
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -476,12 +566,11 @@ export class ProxyClient {
 			description?: string;
 		};
 	}): Promise<Workflow> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/workflow/create`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/workflow/create`,
+			{ method: 'POST', body: JSON.stringify(input) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -503,12 +592,11 @@ export class ProxyClient {
 		workflowId: string,
 		payload?: Record<string, string | number | boolean | null>,
 	): Promise<{ runId: string }> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/workflow/${workflowId}/trigger`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify({ payload }),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/workflow/${workflowId}/trigger`,
+			{ method: 'POST', body: JSON.stringify({ payload }) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -528,10 +616,11 @@ export class ProxyClient {
 	 * The host scopes the query to sandboxToken.agentId.
 	 */
 	async listAgents(): Promise<AgentCollaboratorSummary[]> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/agents`, {
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/agents`,
+			{},
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -555,12 +644,11 @@ export class ProxyClient {
 		message: string,
 		context?: string,
 	): Promise<AgentMessageResult> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/message`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify({ message, context }),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/message`,
+			{ method: 'POST', body: JSON.stringify({ message, context }) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -587,12 +675,11 @@ export class ProxyClient {
 		message: string,
 		context?: string,
 	): Promise<AgentAskResult> {
-		const started = await fetch(`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/ask`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify({ message, context }),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const started = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/agent/${targetAgentId}/ask`,
+			{ method: 'POST', body: JSON.stringify({ message, context }) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const startJson = (await started.json()) as {
 			success: boolean;
 			data?: AgentAskStartResult;
@@ -609,10 +696,11 @@ export class ProxyClient {
 
 			let poll: AgentAskPollResult;
 			try {
-				const res = await fetch(`${this.baseUrl}/v1/runtime/internal/agent/ask/${threadId}`, {
-					headers: this.authHeaders(),
-					signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-				});
+				const res = await this.authedFetch(
+					`${this.baseUrl}/v1/runtime/internal/agent/ask/${threadId}`,
+					{},
+					CONTROL_TIMEOUT_MS,
+				);
 				const json = (await res.json()) as {
 					success: boolean;
 					data?: AgentAskPollResult;
@@ -653,12 +741,11 @@ export class ProxyClient {
 	 * navigation / screenshots can take many seconds.
 	 */
 	async browserAction(request: BrowserActionRequest): Promise<BrowserActionResult> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/browser/action`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(request),
-			signal: AbortSignal.timeout(IO_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/browser/action`,
+			{ method: 'POST', body: JSON.stringify(request) },
+			IO_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -680,12 +767,11 @@ export class ProxyClient {
 	 * perform slow network work.
 	 */
 	async mcpCallTool(request: McpCallToolRequest): Promise<McpCallToolResult> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mcp/call-tool`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(request),
-			signal: AbortSignal.timeout(IO_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/mcp/call-tool`,
+			{ method: 'POST', body: JSON.stringify(request) },
+			IO_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;
@@ -706,12 +792,11 @@ export class ProxyClient {
 	 * message, and pushes it to the chat UI. Returns the persisted ChatFile.
 	 */
 	async shareFile(path: string): Promise<ChatFile> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/files/share`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify({ path }),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/files/share`,
+			{ method: 'POST', body: JSON.stringify({ path }) },
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as { success: boolean; data?: ChatFile; error?: string };
 		if (!json.success || !json.data) {
@@ -726,12 +811,11 @@ export class ProxyClient {
 
 	/** Rewrite the mission's plan document (persistent memory across wakes) */
 	async missionUpdatePlan(plan: string): Promise<void> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/plan`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify({ plan }),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/mission/plan`,
+			{ method: 'POST', body: JSON.stringify({ plan }) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as { success: boolean; error?: string };
 		if (!json.success) {
 			throw new Error(`Mission plan update failed: ${json.error ?? 'unknown error'}`);
@@ -740,12 +824,11 @@ export class ProxyClient {
 
 	/** Append an entry to the mission activity journal */
 	async missionLog(input: MissionLogRequest): Promise<MissionEvent> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/log`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/mission/log`,
+			{ method: 'POST', body: JSON.stringify(input) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as { success: boolean; data?: MissionEvent; error?: string };
 		if (!json.success || !json.data) {
 			throw new Error(`Mission log failed: ${json.error ?? 'unknown error'}`);
@@ -757,12 +840,11 @@ export class ProxyClient {
 	async missionScheduleNextWake(
 		input: MissionScheduleWakeRequest,
 	): Promise<MissionScheduleWakeResult> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/schedule`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/mission/schedule`,
+			{ method: 'POST', body: JSON.stringify(input) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as {
 			success: boolean;
 			data?: MissionScheduleWakeResult;
@@ -776,12 +858,11 @@ export class ProxyClient {
 
 	/** Declare the mission's goal achieved (or permanently unachievable) */
 	async missionComplete(summary: string): Promise<void> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/complete`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify({ summary }),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/mission/complete`,
+			{ method: 'POST', body: JSON.stringify({ summary }) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as { success: boolean; error?: string };
 		if (!json.success) {
 			throw new Error(`Mission complete failed: ${json.error ?? 'unknown error'}`);
@@ -790,12 +871,11 @@ export class ProxyClient {
 
 	/** Send a proactive progress report to the owner; returns delivery channels */
 	async missionReport(input: MissionReportRequest): Promise<{ delivered: string[] }> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/report`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/mission/report`,
+			{ method: 'POST', body: JSON.stringify(input) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as {
 			success: boolean;
 			data?: { delivered: string[] };
@@ -812,12 +892,11 @@ export class ProxyClient {
 		action: string,
 		rationale: string,
 	): Promise<MissionApprovalCreateResult> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/mission/approval`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify({ action, rationale }),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/mission/approval`,
+			{ method: 'POST', body: JSON.stringify({ action, rationale }) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as {
 			success: boolean;
 			data?: MissionApprovalCreateResult;
@@ -835,10 +914,11 @@ export class ProxyClient {
 
 	/** List this agent's missions */
 	async listMissions(): Promise<AgentMission[]> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions`, {
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/missions`,
+			{},
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as { success: boolean; data?: AgentMission[]; error?: string };
 		if (!json.success || !json.data) {
 			throw new Error(`List missions failed: ${json.error ?? 'unknown error'}`);
@@ -848,10 +928,11 @@ export class ProxyClient {
 
 	/** Read one of this agent's missions */
 	async readMission(missionId: string): Promise<AgentMission> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions/${missionId}`, {
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/missions/${missionId}`,
+			{},
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as { success: boolean; data?: AgentMission; error?: string };
 		if (!json.success || !json.data) {
 			throw new Error(`Read mission failed: ${json.error ?? 'unknown error'}`);
@@ -861,12 +942,11 @@ export class ProxyClient {
 
 	/** Create a mission for this agent (draft unless input.activate) */
 	async createMission(input: CreateMissionRequest): Promise<AgentMission> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/missions`,
+			{ method: 'POST', body: JSON.stringify(input) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as { success: boolean; data?: AgentMission; error?: string };
 		if (!json.success || !json.data) {
 			throw new Error(`Create mission failed: ${json.error ?? 'unknown error'}`);
@@ -876,12 +956,11 @@ export class ProxyClient {
 
 	/** Update an existing mission's goal/schedule/budgets/policy */
 	async updateMission(missionId: string, input: UpdateMissionRequest): Promise<AgentMission> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions/${missionId}/update`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify(input),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/missions/${missionId}/update`,
+			{ method: 'POST', body: JSON.stringify(input) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as { success: boolean; data?: AgentMission; error?: string };
 		if (!json.success || !json.data) {
 			throw new Error(`Update mission failed: ${json.error ?? 'unknown error'}`);
@@ -891,12 +970,11 @@ export class ProxyClient {
 
 	/** Control a mission: activate | pause | complete | wake */
 	async controlMission(missionId: string, action: MissionControlAction): Promise<void> {
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/missions/${missionId}/control`, {
-			method: 'POST',
-			headers: this.authHeaders(),
-			body: JSON.stringify({ action }),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/missions/${missionId}/control`,
+			{ method: 'POST', body: JSON.stringify({ action }) },
+			CONTROL_TIMEOUT_MS,
+		);
 		const json = (await res.json()) as { success: boolean; error?: string };
 		if (!json.success) {
 			throw new Error(`Mission ${action} failed: ${json.error ?? 'unknown error'}`);
@@ -914,10 +992,11 @@ export class ProxyClient {
 		}
 
 		// Fallback: fetch from host (e.g. for long-running containers)
-		const res = await fetch(`${this.baseUrl}/v1/runtime/internal/config`, {
-			headers: this.authHeaders(),
-			signal: AbortSignal.timeout(CONTROL_TIMEOUT_MS),
-		});
+		const res = await this.authedFetch(
+			`${this.baseUrl}/v1/runtime/internal/config`,
+			{},
+			CONTROL_TIMEOUT_MS,
+		);
 
 		const json = (await res.json()) as {
 			success: boolean;

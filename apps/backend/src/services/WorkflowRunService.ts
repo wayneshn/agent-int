@@ -21,6 +21,7 @@ function rowToRun(row: typeof workflowRuns.$inferSelect): WorkflowRun {
 		triggerId: row.triggerId ?? undefined,
 		triggerPayload: (row.triggerPayload as Record<string, unknown>) ?? undefined,
 		error: row.error ?? undefined,
+		isTest: row.isTest,
 		startedAt: row.startedAt,
 		completedAt: row.completedAt ?? undefined,
 	};
@@ -64,6 +65,8 @@ export class WorkflowRunService {
 		triggerType: WorkflowRun['triggerType'];
 		triggerId?: string;
 		triggerPayload?: Record<string, unknown>;
+		/** True for builder Test-mode runs — excluded from the normal runs history. */
+		isTest?: boolean;
 	}): Promise<WorkflowRun> {
 		const now = new Date();
 		const [row] = await db
@@ -76,6 +79,7 @@ export class WorkflowRunService {
 				triggerType: input.triggerType,
 				triggerId: input.triggerId ?? null,
 				triggerPayload: input.triggerPayload ?? null,
+				isTest: input.isTest ?? false,
 				startedAt: now,
 			})
 			.returning();
@@ -181,18 +185,21 @@ export class WorkflowRunService {
 		limit = 20,
 		offset = 0,
 	): Promise<{ runs: WorkflowRun[]; total: number }> {
+		// Exclude Test-mode runs so scheduled/production history stays clean.
+		const where = and(
+			eq(workflowRuns.workflowId, workflowId),
+			eq(workflowRuns.ownerId, ownerId),
+			eq(workflowRuns.isTest, false),
+		);
 		const [rows, countResult] = await Promise.all([
 			db
 				.select()
 				.from(workflowRuns)
-				.where(and(eq(workflowRuns.workflowId, workflowId), eq(workflowRuns.ownerId, ownerId)))
+				.where(where)
 				.orderBy(desc(workflowRuns.startedAt))
 				.limit(limit)
 				.offset(offset),
-			db
-				.select({ total: count() })
-				.from(workflowRuns)
-				.where(and(eq(workflowRuns.workflowId, workflowId), eq(workflowRuns.ownerId, ownerId))),
+			db.select({ total: count() }).from(workflowRuns).where(where),
 		]);
 
 		return {
@@ -251,22 +258,25 @@ export class WorkflowRunService {
 			startedAt: Date;
 		}>
 	> {
-		return db
-			.select({
-				id: workflowRuns.id,
-				workflowId: workflowRuns.workflowId,
-				workflowName: workflows.name,
-				agentId: workflowRuns.agentId,
-				agentName: agents.name,
-				status: workflowRuns.status,
-				error: workflowRuns.error,
-				startedAt: workflowRuns.startedAt,
-			})
-			.from(workflowRuns)
-			.innerJoin(workflows, eq(workflows.id, workflowRuns.workflowId))
-			.innerJoin(agents, eq(agents.id, workflowRuns.agentId))
-			.where(eq(workflowRuns.ownerId, ownerId))
-			.orderBy(desc(workflowRuns.startedAt))
-			.limit(limit);
+		return (
+			db
+				.select({
+					id: workflowRuns.id,
+					workflowId: workflowRuns.workflowId,
+					workflowName: workflows.name,
+					agentId: workflowRuns.agentId,
+					agentName: agents.name,
+					status: workflowRuns.status,
+					error: workflowRuns.error,
+					startedAt: workflowRuns.startedAt,
+				})
+				.from(workflowRuns)
+				.innerJoin(workflows, eq(workflows.id, workflowRuns.workflowId))
+				.innerJoin(agents, eq(agents.id, workflowRuns.agentId))
+				// Exclude Test-mode runs from the dashboard activity feed.
+				.where(and(eq(workflowRuns.ownerId, ownerId), eq(workflowRuns.isTest, false)))
+				.orderBy(desc(workflowRuns.startedAt))
+				.limit(limit)
+		);
 	}
 }

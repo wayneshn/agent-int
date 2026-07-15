@@ -98,7 +98,6 @@ export const load: PageServerLoad = async (event) => {
 	return {
 		agent,
 		credentials,
-		allCredentials,
 		definitions,
 		appTriggerProviders,
 		browserAvailable,

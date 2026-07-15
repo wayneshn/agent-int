@@ -1,14 +1,19 @@
 <script lang="ts">
 	import { browser } from '$app/environment';
-	import type { Snippet } from 'svelte';
+	import { onDestroy, type Snippet } from 'svelte';
 	import { SvelteFlowProvider, type Node, type Edge } from '@xyflow/svelte';
 	import * as Tooltip from '$lib/components/ui/tooltip/index.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import { themeStore } from '$lib/stores/theme.store.js';
+	import { api } from '$lib/api.client.js';
+	import { setAlert } from '$lib/components/custom/alert/alert-state.svelte.js';
+	import { testRun, resetTestRun } from '$lib/workflow/test-run.svelte.js';
 	import WorkflowCanvas from './WorkflowCanvas.svelte';
 	import WorkflowNodeConfigSheet from './WorkflowNodeConfigSheet.svelte';
 	import WorkflowValidationAlert from './WorkflowValidationAlert.svelte';
+	import WorkflowTestDialog from './WorkflowTestDialog.svelte';
 	import InfoIcon from '@lucide/svelte/icons/info';
+	import PlayIcon from '@lucide/svelte/icons/play';
 	import {
 		initialDomainGraph,
 		domainToFlow,
@@ -41,7 +46,6 @@
 		agent: Agent;
 		workflow: Workflow | null;
 		credentials: CredentialMetadata[];
-		allCredentials: CredentialMetadata[];
 		definitions: CredentialDefinition[];
 		/** Whether the agent has browser access — gates the "Agent Browser" tool group. */
 		browserAvailable?: boolean;
@@ -64,7 +68,6 @@
 		agent,
 		workflow,
 		credentials,
-		allCredentials,
 		definitions,
 		browserAvailable = false,
 		toolCatalog,
@@ -378,6 +381,249 @@
 			window.removeEventListener('keydown', onKeyDown, true);
 		};
 	});
+
+	// ── Test mode ─────────────────────────────────────────────────────────────────
+	// A test run is a real run seeded with a chosen trigger payload. It requires a SAVED,
+	// unmodified workflow so canvas node ids match the persisted step ids the run logs against.
+	import type { WorkflowRun, WorkflowStepLog } from '@repo/types';
+
+	const agentId = $derived(agent.id);
+	const workflowId = $derived(workflow?.id ?? null);
+	const triggerId = $derived(workflow?.trigger?.id ?? null);
+
+	// Test requires a SAVED workflow (canvas node ids must match persisted step ids). It runs the
+	// saved server-side definition, so unsaved canvas moves are irrelevant — no dirty gate (a
+	// snapshot gate previously drifted on Svelte Flow position changes and wrongly disabled re-test).
+	const canTest = $derived(!!workflowId && !!triggerId);
+
+	let testDialogOpen = $state(false);
+	// What the payload dialog does on confirm: run the whole workflow, preview the trigger data
+	// only (no run), or run a single step.
+	type TestAction = 'full' | 'trigger' | { node: string };
+	let pendingAction = $state<TestAction>('full');
+	let currentRun = $state<{ id: string; mode: 'full' | 'single' } | null>(null);
+
+	const triggerNodeId = $derived(domain.nodes.find((n) => n.type === 'trigger')?.id ?? null);
+	const dialogMode = $derived(
+		pendingAction === 'trigger' ? 'trigger' : pendingAction === 'full' ? 'full' : 'single'
+	);
+
+	/** Display name of a node in the live graph (for dependency messages). */
+	function nodeName(id: string): string {
+		const n = domain.nodes.find((x) => x.id === id);
+		if (!n) return 'a previous step';
+		if (n.type === 'agent') return n.data.name || 'Step';
+		if (n.type === 'condition') return n.data.name || 'Condition';
+		if (n.type === 'loop') return n.data.name || 'Loop';
+		return 'Trigger';
+	}
+
+	/** Upstream sources (trigger + transitive ancestors) the selected loop can iterate.
+	 *  Walks incoming edges backwards, excluding the loop's own body feedback (loopBack)
+	 *  so body nodes are never offered as an items source. */
+	const loopSources = $derived.by(() => {
+		if (selectedNodeType !== 'loop' || !selectedNodeId) return [];
+		const ancestors = new Set<string>();
+		const queue = [selectedNodeId];
+		while (queue.length > 0) {
+			const cur = queue.shift()!;
+			for (const e of domain.edges) {
+				if (e.target !== cur || e.targetHandle === 'loopBack') continue;
+				if (e.source !== selectedNodeId && !ancestors.has(e.source)) {
+					ancestors.add(e.source);
+					queue.push(e.source);
+				}
+			}
+		}
+		return domain.nodes
+			.filter((n) => ancestors.has(n.id))
+			.map((n) => ({
+				id: n.id,
+				name: nodeName(n.id),
+				kind: n.type as 'trigger' | 'agent' | 'condition' | 'loop'
+			}));
+	});
+
+	/** A non-trigger predecessor of `nodeId` with no successful output yet, or null. */
+	function unmetDependency(nodeId: string): string | null {
+		const triggerNode = domain.nodes.find((n) => n.type === 'trigger');
+		for (const e of domain.edges) {
+			if (e.target !== nodeId || e.targetHandle === 'loopBack') continue;
+			if (triggerNode && e.source === triggerNode.id) continue;
+			const log = testRun.logByNodeId[e.source];
+			if (!log || log.status !== 'success') return nodeName(e.source);
+		}
+		return null;
+	}
+
+	/** Prior-run outputs keyed by node id, to seed a single-node test. */
+	function seededOutputs(): Record<string, Record<string, unknown>> {
+		const out: Record<string, Record<string, unknown>> = {};
+		for (const [id, log] of Object.entries(testRun.logByNodeId)) {
+			if (log.status === 'success' && log.outputData) out[id] = log.outputData;
+		}
+		return out;
+	}
+
+	function openTestDialog(action: TestAction) {
+		if (!canTest) {
+			setAlert({
+				type: 'warning',
+				title: 'Save before testing',
+				message: 'Save the workflow first — Test runs the saved version.',
+				duration: 5000,
+				show: true
+			});
+			return;
+		}
+		pendingAction = action;
+		testDialogOpen = true;
+	}
+
+	// Dialog confirm — dispatch by the pending action.
+	function onDialogConfirm(payload: Record<string, unknown>) {
+		testDialogOpen = false;
+		if (pendingAction === 'trigger') {
+			// Testing the trigger ONLY sets/previews its data — it does not run any steps. The
+			// payload also seeds later single-step tests.
+			testRun.seedPayload = payload;
+			testRun.active = true;
+			return;
+		}
+		if (pendingAction === 'full') {
+			void startRun(payload, {});
+			return;
+		}
+		void startRun(payload, { testNodeId: pendingAction.node });
+	}
+
+	async function startRun(payload: Record<string, unknown>, opts: { testNodeId?: string } = {}) {
+		if (!workflowId) return;
+		const mode: 'full' | 'single' = opts.testNodeId ? 'single' : 'full';
+		testRun.busy = true;
+		try {
+			const res = await api(`/agents/${agentId}/workflows/${workflowId}/test-run`, {
+				method: 'POST',
+				headers: { 'Content-Type': 'application/json' },
+				body: JSON.stringify({
+					payload,
+					testNodeId: opts.testNodeId,
+					seededOutputs: opts.testNodeId ? seededOutputs() : undefined
+				})
+			});
+			const body = (await res.json()) as {
+				success: boolean;
+				data?: { runId: string };
+				error?: string;
+			};
+			if (!res.ok || !body.success || !body.data) {
+				throw new Error(body.error ?? 'Test run failed to start.');
+			}
+			// Full run clears the overlay; a single-node run KEEPS prior outputs (they seed later
+			// steps). The poller then merges (single) or replaces (full) the per-node logs.
+			if (mode === 'full') resetTestRun();
+			testRun.seedPayload = payload;
+			testRun.active = true;
+			testRun.status = 'running';
+			currentRun = { id: body.data.runId, mode };
+			testDialogOpen = false;
+		} catch (err) {
+			setAlert({
+				type: 'error',
+				title: 'Could not start test run',
+				message: err instanceof Error ? err.message : 'Please try again.',
+				duration: 6000,
+				show: true
+			});
+		} finally {
+			testRun.busy = false;
+		}
+	}
+
+	// Expose the per-node ▶ action + gating to the overlays. The TRIGGER node previews its data
+	// only (no run); a STEP runs ONLY itself (guarded on upstream data). The whole workflow runs
+	// solely from the top-bar Test button.
+	$effect(() => {
+		testRun.canTest = canTest;
+		testRun.runNode = (nodeId?: string) => {
+			if (nodeId === undefined || nodeId === triggerNodeId) {
+				openTestDialog('trigger'); // trigger node ▶ → set/preview trigger data, no run
+				return;
+			}
+			const missing = unmetDependency(nodeId);
+			if (missing) {
+				setAlert({
+					type: 'warning',
+					title: 'Missing upstream data',
+					message: `This step needs data from "${missing}". Run it (or the whole workflow) first.`,
+					duration: 6000,
+					show: true
+				});
+				return;
+			}
+			if (testRun.seedPayload) void startRun(testRun.seedPayload, { testNodeId: nodeId });
+			else openTestDialog({ node: nodeId });
+		};
+	});
+
+	// Live poll — keyed on the run id ONLY (never reads testRun.status, which it also writes), so a
+	// new run always restarts polling. Merges (single) or replaces (full) the per-node logs.
+	$effect(() => {
+		const run = currentRun;
+		if (!browser || !run || !workflowId) return;
+		const { id: runId, mode } = run;
+		let stopped = false;
+		let timer: ReturnType<typeof setInterval>;
+
+		async function tick() {
+			if (stopped) return;
+			const [runRes, stepsRes] = await Promise.all([
+				api(`/agents/${agentId}/workflows/${workflowId}/runs/${runId}`),
+				api(`/agents/${agentId}/workflows/${workflowId}/runs/${runId}/steps`)
+			]);
+			if (stepsRes.ok) {
+				const body = (await stepsRes.json()) as { data?: WorkflowStepLog[] };
+				const reduced: Record<string, WorkflowStepLog> = {};
+				for (const log of body.data ?? []) {
+					const prev = reduced[log.stepId];
+					// Later loop iterations win via a higher stepIndex; within a single execution,
+					// retries share the same stepIndex, so tie-break on attemptNumber (>= so the
+					// last-seen max attempt wins) — otherwise a retried-then-succeeded step is left
+					// showing its first (failed) attempt, which blocks/mis-seeds single-node tests.
+					const newer =
+						!prev ||
+						log.stepIndex > prev.stepIndex ||
+						(log.stepIndex === prev.stepIndex && log.attemptNumber >= prev.attemptNumber);
+					if (newer) reduced[log.stepId] = log;
+				}
+				testRun.logByNodeId = mode === 'full' ? reduced : { ...testRun.logByNodeId, ...reduced };
+			}
+			if (runRes.ok) {
+				const body = (await runRes.json()) as { data?: WorkflowRun };
+				const status = body.data?.status;
+				if (status) {
+					testRun.status = status;
+					if (status !== 'running') {
+						stopped = true;
+						clearInterval(timer);
+					}
+				}
+			}
+		}
+
+		timer = setInterval(() => void tick().catch(() => {}), 3000);
+		void tick();
+		return () => {
+			stopped = true;
+			clearInterval(timer);
+		};
+	});
+
+	onDestroy(() => {
+		resetTestRun();
+		testRun.runNode = null;
+		testRun.canTest = false;
+	});
 </script>
 
 <div class="space-y-4">
@@ -446,6 +692,39 @@
 					</Tooltip.Content>
 				</Tooltip.Root>
 			</Tooltip.Provider>
+
+			<!-- Test the saved workflow with a chosen trigger payload; results overlay on the nodes. -->
+			<Tooltip.Provider delayDuration={200}>
+				<Tooltip.Root>
+					<Tooltip.Trigger>
+						{#snippet child({ props })}
+							<Button
+								{...props}
+								type="button"
+								variant="ghost"
+								size="sm"
+								class="gap-1.5 text-muted-foreground"
+								disabled={!canTest || testRun.busy}
+								onclick={() => openTestDialog('full')}
+							>
+								<PlayIcon class="size-4" />
+								Test
+							</Button>
+						{/snippet}
+					</Tooltip.Trigger>
+					<Tooltip.Content class="max-w-xs">
+						<p class="text-xs leading-relaxed">
+							{#if canTest}
+								Run the workflow with a trigger payload you provide. Each step shows its real input
+								and output. Uses your live model and credentials.
+							{:else}
+								Save the workflow (with no unsaved changes) to test it.
+							{/if}
+						</p>
+					</Tooltip.Content>
+				</Tooltip.Root>
+			</Tooltip.Provider>
+
 			{@render actions?.()}
 		</div>
 
@@ -475,6 +754,7 @@
 	{onSaveStep}
 	condition={selectedCondition}
 	loop={selectedLoop}
+	{loopSources}
 	{onSaveCondition}
 	{onSaveLoop}
 	{triggerKind}
@@ -488,9 +768,23 @@
 	{appPollIntervalSec}
 	{onSaveTrigger}
 	providers={appTriggerProviders}
-	{allCredentials}
 	{webhookSecret}
 	{webhookUrl}
 	triggerId={workflow?.trigger?.id ?? null}
 	{appRegistration}
+/>
+
+<!-- Test-mode payload dialog -->
+<WorkflowTestDialog
+	open={testDialogOpen}
+	mode={dialogMode}
+	{triggerKind}
+	{appProvider}
+	{appEvent}
+	{appCredentialId}
+	{appParams}
+	providers={appTriggerProviders}
+	busy={testRun.busy}
+	onOpenChange={(o) => (testDialogOpen = o)}
+	onConfirm={onDialogConfirm}
 />

@@ -1,30 +1,21 @@
-import { Agent, type StreamFn } from '@earendil-works/pi-agent-core';
-import {
-	type Model,
-	type TextContent,
-	type ImageContent,
-	type AssistantMessage,
-	type ToolCall,
-	type Context,
-	type Usage,
-	createAssistantMessageEventStream,
-} from '@earendil-works/pi-ai';
+import { Agent } from '@earendil-works/pi-agent-core';
+import { type Model, type TextContent, type ImageContent } from '@earendil-works/pi-ai';
 import type {
 	AgentRuntimeConfig,
-	LlmProxyRequest,
 	WorkflowStep,
 	WorkflowNode,
 	WorkflowEdge,
 	WorkflowAgentNode,
 	WorkflowConditionNode,
 	WorkflowLoopNode,
+	ContentBlock,
 } from '@repo/types';
 import {
 	logger,
-	resolveProviderApi,
 	ensureGraph,
 	graphToSteps,
 	evalFilter,
+	extractJsonValue,
 	BROWSER_TOOL_GROUP,
 } from '@repo/utils';
 import { ProxyClient } from './proxy-client.js';
@@ -32,6 +23,7 @@ import { createAgentTools } from './tools/index.js';
 import { buildSkillsPromptSection } from './prompt-sections.js';
 import { recordSkillTraces, type ToolLogEntry } from './skill-trace.js';
 import { validateJsonSchema } from './json-schema.js';
+import { createProxyStreamFn, forceTextConclusion } from './llm-stream.js';
 
 /** Run-level skill activation tracking shared across all steps of a workflow */
 interface SkillTracker {
@@ -42,16 +34,6 @@ interface SkillTracker {
 
 /** Default max tool calls per step if not set on the step definition */
 const DEFAULT_MAX_TOOL_CALLS_PER_STEP = 20;
-
-/** Zero-value Usage for placeholder AssistantMessage returned by streamFn */
-const zeroUsage: Usage = {
-	input: 0,
-	output: 0,
-	cacheRead: 0,
-	cacheWrite: 0,
-	totalTokens: 0,
-	cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
-};
 
 const WORKSPACE_ROOT = process.env.WORKSPACE_ROOT ?? '/workspace';
 
@@ -77,8 +59,9 @@ interface RunContext {
 	orderedAgentIds: string[];
 	skillTracker: SkillTracker;
 	triggerNodeId: string;
-	/** Active loop frame ({{loop.item}} / {{loop.index}}); null when not looping. */
-	loopFrame: { item: unknown; index: number } | null;
+	/** Active loop frame ({{loop.item}} / {{loop.index}}); null when not looping.
+	 *  `total` is the item count for forEach loops (undefined for while loops). */
+	loopFrame: { item: unknown; index: number; total?: number } | null;
 	/** Nodes that actually executed in this run (across the main graph and loop bodies). */
 	visited: Set<string>;
 	/** Nodes that were resolved-as-skipped and already logged (so the sweep won't double-log). */
@@ -111,12 +94,54 @@ function stringifyValue(value: unknown): string {
 }
 
 /**
+ * Resolve one template variable to its RAW value (no stringification). Supports the
+ * same dotted sub-paths as {@link resolveVar}. Returns undefined when the variable/path
+ * can't be resolved. Used by the loop's items resolver so an array stays an array.
+ */
+function resolveVarRaw(key: string, ctx: RunContext): unknown {
+	const segments = key.split('.');
+
+	if (segments[0] === 'trigger' && segments[1] === 'payload') {
+		return walkPath(ctx.triggerPayload, segments.slice(2));
+	}
+
+	if (segments[0] === 'loop' && ctx.loopFrame) {
+		if (segments[1] === 'index') return ctx.loopFrame.index;
+		if (segments[1] === 'item') {
+			return walkPath(ctx.loopFrame.item, segments.slice(2));
+		}
+		return undefined;
+	}
+
+	if (segments[0] === 'steps' && segments[2] === 'output') {
+		const ref = segments[1];
+		let output: Record<string, unknown> | undefined = ctx.outputsByNode[ref];
+		if (!output) {
+			// Legacy index alias: steps.<index>.output → the agent node at that position.
+			const idx = Number(ref);
+			if (Number.isInteger(idx)) {
+				const nodeId = ctx.orderedAgentIds[idx];
+				if (nodeId) output = ctx.outputsByNode[nodeId];
+			}
+		}
+		if (!output) return undefined;
+		return walkPath(output, segments.slice(3));
+	}
+
+	return undefined;
+}
+
+/**
  * Resolve one template variable against the run context. Supports dotted sub-paths:
  *   {{trigger.payload}} / {{trigger.payload.a.b}}
  *   {{steps.<nodeId>.output}} / {{steps.<nodeId>.output.a.b}}
  *   {{steps.<index>.output...}} — legacy linear-index alias (older workflows)
  *   {{loop.item}} / {{loop.item.a.b}} / {{loop.index}}
  * Returns undefined when the variable/path can't be resolved (the ref is left intact).
+ *
+ * Note: this intentionally differs from {@link resolveVarRaw} — when the top-level var
+ * matches but a sub-path is missing (e.g. {{trigger.payload.absent}}), it substitutes ''
+ * (via stringifyValue) rather than leaving the literal ref, preserving prior behavior.
  */
 function resolveVar(key: string, ctx: RunContext): string | undefined {
 	const segments = key.split('.');
@@ -190,14 +215,35 @@ function buildPriorResultsText(ctx: RunContext): string {
 }
 
 /**
+ * Default LLM context for a node: the CURRENT loop item when inside a forEach loop body,
+ * otherwise the results of ALL previous steps (buildPriorResultsText). Keeps every kind of
+ * loop-body node (agent step, smart condition) scoped to one element per iteration rather
+ * than being handed the whole source array. While-loops have no item, so they fall through
+ * to the prior-results context.
+ */
+function defaultNodeContext(ctx: RunContext): string {
+	if (ctx.loopFrame && ctx.loopFrame.item !== undefined) {
+		const { item, index, total } = ctx.loopFrame;
+		const header =
+			total !== undefined
+				? `## Current item (index ${index}, ${index + 1} of ${total})`
+				: `## Current item (index ${index})`;
+		return `${header}\n${stringifyValue(item)}`;
+	}
+	return buildPriorResultsText(ctx);
+}
+
+/**
  * Resolve a step's input. A custom inputMapping template fully replaces the context;
- * otherwise the step receives the results of ALL previous steps (buildPriorResultsText).
+ * otherwise the step gets {@link defaultNodeContext} — the current item inside a loop
+ * body, or all prior results elsewhere. Prior outputs and the trigger remain referenceable
+ * from a loop body via an explicit inputMapping.
  */
 function resolveInputMapping(step: WorkflowStep, ctx: RunContext): string {
 	if (step.inputMapping) {
 		return applyTemplate(step.inputMapping, ctx);
 	}
-	return buildPriorResultsText(ctx);
+	return defaultNodeContext(ctx);
 }
 
 // ─── System prompt building ───────────────────────────────────────────────────
@@ -206,6 +252,7 @@ function buildStepSystemPrompt(
 	config: AgentRuntimeConfig,
 	step: WorkflowStep,
 	inputContext: string,
+	resolvedInstruction: string,
 ): string {
 	const workflow = config.workflow!;
 	const { triggerContext } = workflow;
@@ -218,16 +265,17 @@ function buildStepSystemPrompt(
 		`Trigger time: ${triggerContext.firedAt}\n` +
 		`Current server time: ${now}\n\n` +
 		`## Agent Instructions\n${config.systemInstruction}\n\n` +
-		`## Step Instruction\n${step.instruction}\n\n` +
+		`## Step Instruction\n${resolvedInstruction}\n\n` +
 		`## Step Input\n${inputContext}`;
 
 	// Schema mode — require JSON output
 	if (step.expectedResponseSchema) {
 		prompt +=
 			`\n\n## Required Output Format\n` +
-			`You MUST respond with a valid JSON object that strictly conforms to this schema:\n` +
+			`You MUST respond with a single JSON value that strictly conforms to this schema:\n` +
 			`\`\`\`json\n${JSON.stringify(step.expectedResponseSchema, null, 2)}\n\`\`\`\n` +
-			`Return ONLY the JSON object with no other text, no markdown fences, no explanation.`;
+			`Respond with ONLY the JSON value — the very first character of your reply must be ` +
+			`\`{\` or \`[\`. No prose before or after it, no explanation, and no markdown code fences.`;
 	}
 
 	// Credential guidance — all of the agent's credentials when allCredentials is set
@@ -289,7 +337,6 @@ async function executeStep(
 	stepPrompt: string,
 	skillTracker: SkillTracker,
 ): Promise<Record<string, unknown>> {
-	const resolvedApi = resolveProviderApi(config.modelProvider ?? '');
 	const maxToolCalls = step.maxToolCallsPerStep ?? DEFAULT_MAX_TOOL_CALLS_PER_STEP;
 
 	// Filter tools to step-allowed subset (empty = all tools)
@@ -311,82 +358,22 @@ async function executeStep(
 		(name.startsWith('browser_') && step.allowedTools.includes(BROWSER_TOOL_GROUP));
 	const effectiveTools = useAllTools ? allTools : allTools.filter((t) => allowsTool(t.name));
 
-	// Capture the final text from the last LLM call in this step.
-	// We use a mutable reference updated on every LLM call; the last one wins.
+	// Capture the last assistant text and any proxy error so the step-conclusion backstop after
+	// waitForIdle() can force a final answer / fail the step honestly (rather than logging an
+	// empty {text:''} as a deceptive success). The last LLM call in the tool loop wins.
 	let lastFinalText = '';
-
-	const streamFn: StreamFn = (model, context) => {
-		const ctx = context as Context;
-		const request: LlmProxyRequest = {
-			messages: ctx.messages,
-			systemPrompt: ctx.systemPrompt ?? stepPrompt,
-			tools: ctx.tools,
-		};
-
-		const eventStream = createAssistantMessageEventStream();
-
-		proxyClient
-			.llmStream(request)
-			.then((contentBlocks) => {
-				// Capture the final text from this LLM call
-				lastFinalText = contentBlocks
-					.filter((b) => b.type === 'text')
-					.map((b) => (b as TextContent).text)
-					.join('\n');
-
-				const content: AssistantMessage['content'] = contentBlocks.map((block) => {
-					if (block.type === 'text') {
-						return { type: 'text' as const, text: block.text } as TextContent;
-					}
-					if (block.type === 'thinking') {
-						return { type: 'thinking' as const, thinking: block.thinking };
-					}
-					const tc = block as {
-						type: 'toolCall';
-						id: string;
-						name: string;
-						arguments: Record<string, unknown>;
-					};
-					return {
-						type: 'toolCall' as const,
-						id: tc.id,
-						name: tc.name,
-						arguments: tc.arguments,
-					} as ToolCall;
-				});
-
-				const assistantMessage: AssistantMessage = {
-					role: 'assistant',
-					content,
-					api: resolvedApi as AssistantMessage['api'],
-					provider: config.modelProvider || 'proxy',
-					model: config.modelId || 'proxy',
-					usage: zeroUsage,
-					stopReason: 'stop',
-					timestamp: Date.now(),
-				};
-
-				eventStream.push({ type: 'done', reason: 'stop', message: assistantMessage });
-				eventStream.end(assistantMessage);
-			})
-			.catch((err: Error) => {
-				const errorMessage: AssistantMessage = {
-					role: 'assistant',
-					content: [],
-					api: resolvedApi as AssistantMessage['api'],
-					provider: config.modelProvider || 'proxy',
-					model: config.modelId || 'proxy',
-					usage: zeroUsage,
-					stopReason: 'error',
-					errorMessage: err.message,
-					timestamp: Date.now(),
-				};
-				eventStream.push({ type: 'error', reason: 'error', error: errorMessage });
-				eventStream.end(errorMessage);
-			});
-
-		return eventStream;
-	};
+	let streamError: Error | null = null;
+	const streamFn = createProxyStreamFn(
+		{ config, proxyClient, fallbackSystemPrompt: stepPrompt },
+		{
+			onResponseText: (text) => {
+				lastFinalText = text;
+			},
+			onError: (err) => {
+				streamError = err;
+			},
+		},
+	);
 
 	const placeholderModel: Model<'openai-completions'> = {
 		id: config.modelId || 'proxy',
@@ -456,40 +443,138 @@ async function executeStep(
 	await agent.prompt(`Execute the following task:\n\n${stepPrompt}`);
 	await agent.waitForIdle();
 
-	// The final text is whatever was captured by the last LLM call in the tool loop
-	const finalText = lastFinalText;
+	// ── Step conclusion backstop (terminal ordering — error first) ───────────
+	// A step must ALWAYS reach a conclusion: a result, an honest failure, or an error —
+	// never a silent stop logged as a deceptive `success` with empty output.
 
-	// Parse and validate JSON if a schema was expected. The output must both parse
-	// as JSON AND conform to the declared schema — a bare JSON.parse would let
-	// structurally-wrong output through despite the step claiming a strict schema.
-	if (step.expectedResponseSchema && finalText.trim()) {
-		let parsed: Record<string, unknown>;
-		try {
-			parsed = JSON.parse(finalText.trim()) as Record<string, unknown>;
-		} catch {
-			logger.warn(
-				{ stepId: step.id, stepName: step.name },
-				'[workflow-runner] step output is not valid JSON despite expectedResponseSchema',
-			);
-			throw new Error(
-				`Step "${step.name}" output is not valid JSON. Output was: ${finalText.slice(0, 200)}`,
-			);
+	// 1. A proxied LLM error fails the step so runAgentNode applies errorHandling
+	//    (retry / continue / stop) instead of recording a silent success.
+	if (streamError) throw streamError;
+
+	// 2. If the tool loop went idle with no text (empty/thinking-only completion, a
+	//    max-tokens truncation, or a tool-cap block whose forced reply came back empty),
+	//    force ONE concluding turn. Schema steps must re-emit the required JSON, not prose.
+	if (!lastFinalText.trim()) {
+		logger.info(
+			{ stepId: step.id, stepName: step.name },
+			'[workflow-runner] step produced no text — forcing a conclusion',
+		);
+		const directive = step.expectedResponseSchema
+			? 'You did not return the required output. Respond now with ONLY the JSON object that ' +
+				'strictly conforms to the schema in your instructions — no other text, no markdown fences.'
+			: 'You ended without producing a result. Provide your final answer now based on what you ' +
+				'gathered, or if you could not complete the task say so plainly and state what is missing. ' +
+				'Do not start new tool work.';
+		await forceTextConclusion(agent, { directive, getText: () => lastFinalText });
+		if (streamError) throw streamError; // the forced call can itself error
+	}
+
+	// 3. Still no output after the forced turn — a step can never silently "succeed" empty.
+	const finalText = lastFinalText;
+	if (!finalText.trim()) {
+		throw new Error(`Step "${step.name}" produced no output.`);
+	}
+
+	// Resolve structured output when a schema was declared. The output must both parse as
+	// JSON AND conform to the schema. Empty output is already rejected above, so a schema step
+	// can no longer slip through with {text:''} by skipping validation entirely.
+	if (step.expectedResponseSchema) {
+		// Layer 1 (free) — recover JSON from the model's own text even when it wrapped the
+		// value in prose or ```json fences. Return immediately if it already conforms.
+		const extracted = extractJsonValue(finalText);
+		if (extracted !== null && validateJsonSchema(step.expectedResponseSchema, extracted) === null) {
+			return extracted as Record<string, unknown>;
 		}
 
-		const schemaError = validateJsonSchema(step.expectedResponseSchema, parsed);
-		if (schemaError) {
+		// Layer 2 (deterministic) — extraction was missing or non-conforming. Force ONE
+		// structured tool call whose input schema IS the expected schema, so the JSON arrives
+		// as tool-call arguments that cannot contain prose. Validate before accepting.
+		const finalized = await finalizeStructuredOutput(step, proxyClient, finalText);
+		if (finalized !== null) {
+			const schemaError = validateJsonSchema(step.expectedResponseSchema, finalized);
+			if (!schemaError) return finalized;
 			logger.warn(
 				{ stepId: step.id, stepName: step.name, schemaError },
-				'[workflow-runner] step output does not conform to expectedResponseSchema',
+				'[workflow-runner] forced structured output does not conform to expectedResponseSchema',
 			);
 			throw new Error(
 				`Step "${step.name}" output does not match the required schema: ${schemaError}`,
 			);
 		}
-		return parsed;
+
+		// Layer 3 — neither path yielded usable JSON; fail into the step's errorHandling.
+		// Prefer a schema-mismatch message when we at least parsed something.
+		if (extracted !== null) {
+			const schemaError = validateJsonSchema(step.expectedResponseSchema, extracted);
+			logger.warn(
+				{ stepId: step.id, stepName: step.name, schemaError },
+				'[workflow-runner] step output does not conform to expectedResponseSchema',
+			);
+			throw new Error(
+				`Step "${step.name}" output does not match the required schema: ${schemaError ?? 'unknown error'}`,
+			);
+		}
+		logger.warn(
+			{ stepId: step.id, stepName: step.name },
+			'[workflow-runner] step output is not valid JSON despite expectedResponseSchema',
+		);
+		throw new Error(
+			`Step "${step.name}" output is not valid JSON. Output was: ${finalText.slice(0, 200)}`,
+		);
 	}
 
 	return { text: finalText };
+}
+
+/**
+ * Deterministic structured-output recovery for schema steps. When a step's final text isn't
+ * directly parseable/conforming, make ONE forced tool call whose input schema IS the step's
+ * expectedResponseSchema — the model must answer as a tool call, so the JSON arrives as
+ * structured `arguments` that cannot contain prose or code fences. The model's own final text
+ * is fed back as the material to structure (no fresh tool work). Returns the parsed arguments,
+ * or null when the provider produced no such tool call (e.g. tool-choice unsupported), so the
+ * caller can fall back to an honest failure.
+ */
+async function finalizeStructuredOutput(
+	step: WorkflowStep,
+	proxyClient: ProxyClient,
+	finalText: string,
+): Promise<Record<string, unknown> | null> {
+	const emitTool = {
+		name: 'emit_result',
+		description:
+			'Return the final result as structured JSON that matches the required schema. ' +
+			'This is the ONLY way to report the result — call it exactly once.',
+		parameters: step.expectedResponseSchema,
+	};
+
+	const systemPrompt =
+		'You convert an assistant result into a single structured tool call. Call the emit_result ' +
+		'tool exactly once, populating its arguments from the result below so they satisfy the ' +
+		'schema. Do not add any commentary or text.';
+
+	const { content } = await proxyClient.llmStream({
+		systemPrompt,
+		messages: [
+			{
+				role: 'user' as const,
+				content: [
+					{
+						type: 'text' as const,
+						text: `Result to structure as emit_result arguments:\n\n${finalText}`,
+					},
+				],
+			},
+		],
+		tools: [emitTool],
+		forceToolName: 'emit_result',
+	});
+
+	const call = content.find(
+		(b): b is Extract<ContentBlock, { type: 'toolCall' }> =>
+			b.type === 'toolCall' && b.name === 'emit_result',
+	);
+	return call ? call.arguments : null;
 }
 
 // ─── Node executors ─────────────────────────────────────────────────────────
@@ -524,18 +609,14 @@ function buildSmartEvalPrompt(
 
 /** Parse the agent's reply into a boolean (lenient); throws if no boolean is found. */
 function parseBooleanResult(text: string): { result: boolean; reason: string } {
-	const jsonMatch = text.match(/\{[\s\S]*\}/);
-	if (jsonMatch) {
-		try {
-			const parsed = JSON.parse(jsonMatch[0]) as { result?: unknown; reason?: unknown };
-			const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
-			if (typeof parsed.result === 'boolean') return { result: parsed.result, reason };
-			if (typeof parsed.result === 'string') {
-				const v = parsed.result.trim().toLowerCase();
-				if (v === 'true' || v === 'false') return { result: v === 'true', reason };
-			}
-		} catch {
-			// fall through to regex
+	const extracted = extractJsonValue(text);
+	if (extracted && typeof extracted === 'object' && !Array.isArray(extracted)) {
+		const parsed = extracted as { result?: unknown; reason?: unknown };
+		const reason = typeof parsed.reason === 'string' ? parsed.reason : '';
+		if (typeof parsed.result === 'boolean') return { result: parsed.result, reason };
+		if (typeof parsed.result === 'string') {
+			const v = parsed.result.trim().toLowerCase();
+			if (v === 'true' || v === 'false') return { result: v === 'true', reason };
 		}
 	}
 	const kv = text.match(/"result"\s*:\s*(true|false)/i);
@@ -563,7 +644,11 @@ async function evalSmartBoolean(
 			],
 		},
 	];
-	const contentBlocks = await ctx.proxyClient.llmStream({ messages, systemPrompt, tools: [] });
+	const { content: contentBlocks } = await ctx.proxyClient.llmStream({
+		messages,
+		systemPrompt,
+		tools: [],
+	});
 	const text = contentBlocks
 		.filter((b) => b.type === 'text')
 		.map((b) => (b as TextContent).text)
@@ -589,32 +674,76 @@ async function runConditionNode(
 ): Promise<NodeExecResult> {
 	const data = node.data;
 	const mode = conditionMode(data);
+	// Inside a loop body the condition judges the CURRENT item, not the whole upstream array.
+	const smartContext = mode === 'smart' ? defaultNodeContext(ctx) : '';
 	const stepIndex = ctx.nextOrder();
-	const logId = await ctx.proxyClient.logWorkflowStepStart({
+	// resolvedContext exposes exactly what the smart judge saw (the current item in a
+	// loop) — parity with an agent step's resolvedInput, so run records show per-iteration data.
+	const inputContext =
+		mode === 'smart'
+			? { mode, prompt: data.prompt, resolvedContext: smartContext }
+			: { mode, filter: data.filter };
+	let currentLogId = await ctx.proxyClient.logWorkflowStepStart({
 		runId: ctx.runId,
 		stepId: node.id,
 		stepIndex,
 		stepName: data.name || 'Condition',
-		inputContext: mode === 'smart' ? { mode, prompt: data.prompt } : { mode, filter: data.filter },
+		inputContext,
 	});
 
-	let result: boolean;
+	// Retry-on-failure, mirroring runAgentNode. Conditions are retry-then-stop only
+	// (two branches → no well-defined 'continue' target). No backoff, matching steps.
+	const maxRetries =
+		data.errorHandling?.action === 'retry' ? (data.errorHandling.maxRetries ?? 1) : 0;
+	let result = false;
 	let reason = '';
-	try {
-		if (mode === 'smart') {
-			const predicate = applyTemplate(data.prompt ?? '', ctx);
-			const evaluation = await evalSmartBoolean(ctx, predicate, buildPriorResultsText(ctx));
-			result = evaluation.result;
-			reason = evaluation.reason;
-		} else {
-			result = evalFilter(data.filter ?? { combinator: 'and', conditions: [] }, (t) =>
-				resolveTemplate(t, ctx),
+	let lastError: Error | null = null;
+	let succeeded = false;
+
+	for (let attempt = 1; attempt <= maxRetries + 1; attempt++) {
+		try {
+			if (mode === 'smart') {
+				const predicate = applyTemplate(data.prompt ?? '', ctx);
+				const evaluation = await evalSmartBoolean(ctx, predicate, smartContext);
+				result = evaluation.result;
+				reason = evaluation.reason;
+			} else {
+				result = evalFilter(data.filter ?? { combinator: 'and', conditions: [] }, (t) =>
+					resolveTemplate(t, ctx),
+				);
+			}
+			succeeded = true;
+			lastError = null;
+			break;
+		} catch (err) {
+			lastError = err instanceof Error ? err : new Error(String(err));
+			logger.warn(
+				{ runId: ctx.runId, nodeId: node.id, name: data.name, attempt, err: lastError.message },
+				'[workflow-runner] condition attempt failed',
 			);
+			if (attempt <= maxRetries) {
+				// Close the current attempt log as failed, then open a fresh row for the retry.
+				await ctx.proxyClient.logWorkflowStepEnd({
+					stepLogId: currentLogId,
+					status: 'failed',
+					error: `Attempt ${attempt} failed: ${lastError.message}. Retrying...`,
+				});
+				currentLogId = await ctx.proxyClient.logWorkflowStepStart({
+					runId: ctx.runId,
+					stepId: node.id,
+					stepIndex,
+					stepName: data.name || 'Condition',
+					inputContext,
+					attemptNumber: attempt + 1,
+				});
+			}
 		}
-	} catch (err) {
-		const message = err instanceof Error ? err.message : String(err);
+	}
+
+	if (!succeeded) {
+		const message = lastError?.message ?? 'Unknown error';
 		await ctx.proxyClient.logWorkflowStepEnd({
-			stepLogId: logId,
+			stepLogId: currentLogId,
 			status: 'failed',
 			error: message,
 		});
@@ -623,7 +752,7 @@ async function runConditionNode(
 
 	ctx.outputsByNode[node.id] = reason ? { result, reason } : { result };
 	await ctx.proxyClient.logWorkflowStepEnd({
-		stepLogId: logId,
+		stepLogId: currentLogId,
 		status: 'success',
 		outputData: ctx.outputsByNode[node.id],
 	});
@@ -667,7 +796,7 @@ function collectBodySubgraph(loopId: string, ctx: RunContext): string[] {
 	return ordered;
 }
 
-/** Best-effort parse of a resolved template into an array for forEach loops. */
+/** Best-effort parse of a hand-typed items string (literal JSON array or a newline list). */
 function parseArray(raw: string): unknown[] {
 	const trimmed = raw.trim();
 	if (!trimmed) return [];
@@ -683,6 +812,54 @@ function parseArray(raw: string): unknown[] {
 			.map((l) => l.trim())
 			.filter(Boolean);
 	}
+}
+
+/** A template that is exactly one `{{ … }}` token (optionally surrounded by whitespace). */
+const WHOLE_TOKEN_RE = /^\s*\{\{([^}]+)\}\}\s*$/;
+
+/**
+ * Resolve a forEach loop's `items` template into a real array. When the template is a
+ * single whole `{{ … }}` token we resolve it to its RAW value (so arrays stay arrays and
+ * objects stay objects), rather than stringifying and re-parsing. A string source is parsed
+ * via {@link parseArray} (JSON array or newline list) to match inline-literal behavior.
+ * Non-array results yield an empty list plus a human-readable `warning` surfaced on the loop node.
+ *
+ * A wrapper object with exactly one array-valued property (e.g. `{ items: [...] }`, or a
+ * prior loop's own `{ iterations, results }`) unwraps to that array — so pointing Items at
+ * a step's whole output still loops over the obvious inner list.
+ */
+function resolveItemsToArray(
+	template: string,
+	ctx: RunContext,
+): { items: unknown[]; warning?: string } {
+	const match = template.match(WHOLE_TOKEN_RE);
+	if (!match) {
+		// Literal JSON array / newline list typed inline — keep the legacy string parse.
+		return { items: parseArray(resolveTemplate(template, ctx)) };
+	}
+
+	const value = resolveVarRaw(match[1].trim(), ctx);
+
+	if (Array.isArray(value)) return { items: value };
+
+	// A string field (JSON-array text or a newline list) — parse like an inline literal would.
+	if (typeof value === 'string') return { items: parseArray(value) };
+
+	if (value && typeof value === 'object') {
+		const arrayProps = Object.values(value).filter(Array.isArray);
+		if (arrayProps.length === 1) return { items: arrayProps[0] as unknown[] };
+		return {
+			items: [],
+			warning:
+				'Source is an object, not a list. Point Items at the array field (e.g. add ".items").',
+		};
+	}
+
+	if (value === undefined) {
+		return { items: [], warning: 'Items reference did not resolve — pick a valid source.' };
+	}
+
+	return { items: [], warning: 'Source is not a list.' };
 }
 
 /** Effective while-eval mode, inferring 'manual' for legacy condition-only loops. */
@@ -722,7 +899,8 @@ async function runLoopNode(node: WorkflowLoopNode, ctx: RunContext): Promise<Nod
 		.map((e) => e.target)
 		.filter((t) => bodyScope.has(t));
 	const maxIter = Math.max(1, Math.min(data.maxIterations ?? 50, MAX_LOOP_ITERATIONS));
-	const items = data.mode === 'forEach' ? parseArray(resolveTemplate(data.items ?? '', ctx)) : [];
+	const { items, warning: itemsWarning } =
+		data.mode === 'forEach' ? resolveItemsToArray(data.items ?? '', ctx) : { items: [] };
 
 	const stepIndex = ctx.nextOrder();
 	const loopLogId = await ctx.proxyClient.logWorkflowStepStart({
@@ -733,6 +911,7 @@ async function runLoopNode(node: WorkflowLoopNode, ctx: RunContext): Promise<Nod
 		inputContext: {
 			mode: data.mode,
 			...(data.mode === 'forEach' ? { itemCount: items.length } : {}),
+			...(itemsWarning ? { itemsWarning } : {}),
 			maxIterations: maxIter,
 		},
 	});
@@ -762,7 +941,11 @@ async function runLoopNode(node: WorkflowLoopNode, ctx: RunContext): Promise<Nod
 			}
 
 			const item = data.mode === 'forEach' ? items[iterations] : undefined;
-			ctx.loopFrame = { item, index: iterations };
+			ctx.loopFrame = {
+				item,
+				index: iterations,
+				...(data.mode === 'forEach' ? { total: items.length } : {}),
+			};
 
 			// Run the body as its own branch-aware subgraph each iteration (so conditions
 			// and nested loops inside the body route correctly), scoped to the body nodes.
@@ -776,9 +959,11 @@ async function runLoopNode(node: WorkflowLoopNode, ctx: RunContext): Promise<Nod
 				return { status: 'stop', error: bodyResult.error };
 			}
 
-			const lastBodyId = bodyIds[bodyIds.length - 1];
-			if (lastBodyId && ctx.outputsByNode[lastBodyId]) {
-				results.push(ctx.outputsByNode[lastBodyId]);
+			// Record this iteration's real terminal output — the LAST body node that actually
+			// executed (skipped branch nodes are excluded), tagged with the item it processed.
+			const lastExecuted = bodyResult.executed.at(-1);
+			if (lastExecuted) {
+				results.push({ index: iterations, item, output: ctx.outputsByNode[lastExecuted] ?? null });
 			}
 			iterations++;
 		}
@@ -790,7 +975,7 @@ async function runLoopNode(node: WorkflowLoopNode, ctx: RunContext): Promise<Nod
 	await ctx.proxyClient.logWorkflowStepEnd({
 		stepLogId: loopLogId,
 		status: 'success',
-		outputData: { iterations, results },
+		outputData: { iterations, results, ...(itemsWarning ? { itemsWarning } : {}) },
 	});
 	logger.info(
 		{ runId: ctx.runId, nodeId: node.id, iterations },
@@ -807,6 +992,9 @@ async function runLoopNode(node: WorkflowLoopNode, ctx: RunContext): Promise<Nod
 async function runAgentNode(node: WorkflowAgentNode, ctx: RunContext): Promise<NodeExecResult> {
 	const step = node.data;
 	const inputContext = resolveInputMapping(step, ctx);
+	// Resolve {{trigger.payload}} / {{steps.X.output}} / {{loop.item}} in the instruction too,
+	// so an item reference written in the instruction (not just the input mapping) works.
+	const resolvedInstruction = applyTemplate(step.instruction, ctx);
 
 	const stepIndex = ctx.nextOrder();
 	logger.info(
@@ -814,16 +1002,23 @@ async function runAgentNode(node: WorkflowAgentNode, ctx: RunContext): Promise<N
 		'[workflow-runner] executing step',
 	);
 
-	// Log step start — returns a stepLogId for subsequent completion calls
+	// Log step start — returns a stepLogId for subsequent completion calls.
+	// `resolvedInput` is the fully-resolved input text the LLM actually received (trigger
+	// payload + prior-step outputs merged), so the builder's Test view shows real input, not
+	// just the template.
 	const stepLogId = await ctx.proxyClient.logWorkflowStepStart({
 		runId: ctx.runId,
 		stepId: step.id,
 		stepIndex,
 		stepName: step.name,
-		inputContext: { instruction: step.instruction, inputMapping: step.inputMapping ?? null },
+		inputContext: {
+			instruction: step.instruction,
+			inputMapping: step.inputMapping ?? null,
+			resolvedInput: inputContext,
+		},
 	});
 
-	const stepPrompt = buildStepSystemPrompt(ctx.config, step, inputContext);
+	const stepPrompt = buildStepSystemPrompt(ctx.config, step, inputContext, resolvedInstruction);
 
 	const maxRetries =
 		step.errorHandling.action === 'retry' ? (step.errorHandling.maxRetries ?? 1) : 0;
@@ -865,7 +1060,11 @@ async function runAgentNode(node: WorkflowAgentNode, ctx: RunContext): Promise<N
 					stepId: step.id,
 					stepIndex,
 					stepName: step.name,
-					inputContext: { instruction: step.instruction, inputMapping: step.inputMapping ?? null },
+					inputContext: {
+						instruction: step.instruction,
+						inputMapping: step.inputMapping ?? null,
+						resolvedInput: inputContext,
+					},
 					attemptNumber: attempt + 1,
 				});
 			}
@@ -962,10 +1161,13 @@ async function runSubgraph(
 	scope: Set<string>,
 	ctx: RunContext,
 	opts: { logSkips: boolean },
-): Promise<{ status: 'ok' } | { status: 'stop'; error: string }> {
+): Promise<{ status: 'ok'; executed: string[] } | { status: 'stop'; error: string }> {
 	const localSettled = new Set<string>();
 	const edgeActive = new Map<string, boolean>();
 	const entrySet = new Set(entryIds);
+	// Node ids that actually EXECUTED in this traversal, in execution order — lets a loop
+	// collect the real terminal output of each iteration (ignoring skipped branch nodes).
+	const executed: string[] = [];
 
 	/** In-scope, non-loopBack incoming edges (out-of-scope predecessors don't gate). */
 	const incomingInScope = (id: string) =>
@@ -990,6 +1192,7 @@ async function runSubgraph(
 			ctx.visited.add(id);
 			const result = await executeNode(node, ctx);
 			if (result.status === 'stop') return { status: 'stop', error: result.error };
+			if (node.type !== 'trigger') executed.push(id);
 			for (const e of ctx.outgoing(id)) {
 				if (e.targetHandle === 'loopBack' || !scope.has(e.target)) continue;
 				edgeActive.set(e.id, result.nextHandles.includes(e.sourceHandle ?? 'out'));
@@ -1007,7 +1210,7 @@ async function runSubgraph(
 			queue.push(e.target);
 		}
 	}
-	return { status: 'ok' };
+	return { status: 'ok', executed };
 }
 
 /** Log any node that neither executed nor was already skipped (e.g. disconnected). */
@@ -1032,6 +1235,86 @@ async function sweepSkipped(ctx: RunContext): Promise<void> {
  * when absent (ensureGraph), and inputMapping resolves both
  * {{steps.<nodeId>.output}} and the legacy {{steps.<index>.output}} alias.
  */
+/** Human label for a node, used in single-node test dependency errors + step logs. */
+function nodeDisplayName(node: WorkflowNode): string {
+	switch (node.type) {
+		case 'trigger':
+			return 'Trigger';
+		case 'agent':
+			return node.data.name || 'Step';
+		case 'condition':
+			return node.data.name || 'Condition';
+		case 'loop':
+			return node.data.name || 'Loop';
+	}
+}
+
+/** The template strings a node reads, where {{steps.X.output}} references can appear. */
+function templateFields(node: WorkflowNode): string[] {
+	const out: string[] = [];
+	const pushFilter = (f: { conditions?: { left?: string; right?: string }[] } | undefined) => {
+		for (const c of f?.conditions ?? []) {
+			if (c.left) out.push(c.left);
+			if (c.right) out.push(c.right);
+		}
+	};
+	if (node.type === 'agent') {
+		if (node.data.inputMapping) out.push(node.data.inputMapping);
+	} else if (node.type === 'condition') {
+		if (node.data.prompt) out.push(node.data.prompt);
+		pushFilter(node.data.filter);
+	} else if (node.type === 'loop') {
+		if (node.data.items) out.push(node.data.items);
+		if (node.data.prompt) out.push(node.data.prompt);
+		pushFilter(node.data.condition);
+	}
+	return out;
+}
+
+/** Node ids referenced by {{steps.<ref>.output...}} in a template (ref = node id or index alias). */
+function stepRefIds(template: string, ctx: RunContext): string[] {
+	const ids: string[] = [];
+	const re = /\{\{\s*steps\.([^.}\s]+)\.output/g;
+	let m: RegExpExecArray | null;
+	while ((m = re.exec(template)) !== null) {
+		const ref = m[1];
+		if (ctx.nodeById.has(ref)) ids.push(ref);
+		else {
+			const idx = Number(ref);
+			if (Number.isInteger(idx) && ctx.orderedAgentIds[idx]) ids.push(ctx.orderedAgentIds[idx]);
+		}
+	}
+	return ids;
+}
+
+/**
+ * For a single-node test: the display name of the FIRST upstream node whose output is required
+ * but absent from `seededOutputs`, or null if all dependencies are satisfied. Combines structural
+ * predecessors (incoming edges) with explicit {{steps.X.output}} template refs. The trigger is
+ * always available (its payload is seeded via the trigger context).
+ */
+function missingUpstream(
+	node: WorkflowNode,
+	ctx: RunContext,
+	seededOutputs: Record<string, Record<string, unknown>>,
+): string | null {
+	const needed = new Set<string>();
+	for (const e of ctx.incoming(node.id)) {
+		if (e.targetHandle === 'loopBack') continue;
+		needed.add(e.source);
+	}
+	for (const tpl of templateFields(node)) for (const id of stepRefIds(tpl, ctx)) needed.add(id);
+
+	for (const id of needed) {
+		if (id === ctx.triggerNodeId) continue;
+		if (!(id in seededOutputs)) {
+			const pred = ctx.nodeById.get(id);
+			return pred ? nodeDisplayName(pred) : 'a previous step';
+		}
+	}
+	return null;
+}
+
 export async function runWorkflow(
 	config: AgentRuntimeConfig,
 	proxyClient: ProxyClient,
@@ -1096,6 +1379,56 @@ export async function runWorkflow(
 			status: 'error',
 			error: 'Workflow has no trigger node',
 		});
+		return;
+	}
+
+	// ── Test-mode "run only this step" ────────────────────────────────────────────
+	// Execute a SINGLE node using outputs captured by a prior test run (seededOutputs),
+	// without re-running its ancestors. If a required upstream output is missing, fail the
+	// node with a clear "depends on previous step" error rather than running with empty input.
+	if (workflow.testNode) {
+		const { nodeId, seededOutputs } = workflow.testNode;
+		for (const [id, out] of Object.entries(seededOutputs)) ctx.outputsByNode[id] = out;
+
+		const target = nodeById.get(nodeId);
+		if (!target || target.type === 'trigger') {
+			await proxyClient.completeWorkflowRun({
+				runId,
+				status: 'error',
+				error: `Test node ${nodeId} not found in the workflow`,
+			});
+			return;
+		}
+
+		const missing = missingUpstream(target, ctx, seededOutputs);
+		if (missing) {
+			const stepIndex = ctx.nextOrder();
+			const logId = await proxyClient.logWorkflowStepStart({
+				runId,
+				stepId: target.id,
+				stepIndex,
+				stepName: nodeDisplayName(target),
+				inputContext: { testNode: true },
+			});
+			const message = `This step needs output from "${missing}" — run that step (or the whole workflow) first.`;
+			await proxyClient.logWorkflowStepEnd({ stepLogId: logId, status: 'failed', error: message });
+			await proxyClient.completeWorkflowRun({ runId, status: 'error', error: message });
+			return;
+		}
+
+		const nodeResult = await executeNode(target, ctx);
+		await proxyClient.completeWorkflowRun({
+			runId,
+			status: nodeResult.status === 'stop' ? 'error' : 'completed',
+			error: nodeResult.status === 'stop' ? nodeResult.error : undefined,
+		});
+		await recordSkillTraces(
+			proxyClient,
+			skillTracker.activatedSkills,
+			nodeResult.status !== 'stop',
+			skillTracker.toolCallCount,
+			skillTracker.toolLog,
+		);
 		return;
 	}
 

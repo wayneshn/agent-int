@@ -1,4 +1,4 @@
-import { Agent, type StreamFn } from '@earendil-works/pi-agent-core';
+import { Agent } from '@earendil-works/pi-agent-core';
 import {
 	type Model,
 	type TextContent,
@@ -6,19 +6,17 @@ import {
 	type UserMessage,
 	type AssistantMessage,
 	type ToolResultMessage,
-	type ToolCall,
 	type Message,
-	type Context,
 	type Usage,
-	createAssistantMessageEventStream,
 } from '@earendil-works/pi-ai';
-import type { AgentRuntimeConfig, LlmProxyRequest } from '@repo/types';
+import type { AgentRuntimeConfig } from '@repo/types';
 import { logger, resolveProviderApi } from '@repo/utils';
 import { ProxyClient } from './proxy-client.js';
 import { createAgentTools } from './tools/index.js';
 import { mcpToolName } from './tools/mcp.js';
 import { buildSkillsPromptSection, buildMissionPromptSection } from './prompt-sections.js';
 import { recordSkillTraces, type ToolLogEntry } from './skill-trace.js';
+import { createProxyStreamFn, forceTextConclusion } from './llm-stream.js';
 
 /** Zero-value Usage for the placeholder AssistantMessage returned by the proxy streamFn */
 const zeroUsage: Usage = {
@@ -113,85 +111,22 @@ export async function runAgent(
 	});
 
 	// ── streamFn: routes every LLM call through the host proxy ────────────────
-	const streamFn: StreamFn = (model, context, options) => {
-		const ctx = context as Context;
-		const request: LlmProxyRequest = {
-			messages: ctx.messages,
-			systemPrompt: ctx.systemPrompt ?? config.systemInstruction,
-			tools: ctx.tools,
-			thinkingLevel: options?.reasoning,
-		};
-
-		logger.debug(
-			{ messages: ctx.messages.length, tools: (ctx.tools ?? []).length },
-			'[agent-runner] → LLM stream request',
-		);
-
-		const eventStream = createAssistantMessageEventStream();
-
-		proxyClient
-			.llmStream(request)
-			.then((contentBlocks) => {
-				const toolCalls = contentBlocks.filter((b) => b.type === 'toolCall').length;
-				logger.debug(
-					{ contentBlocks: contentBlocks.length, toolCalls },
-					'[agent-runner] ← LLM stream response',
-				);
-
-				const content: AssistantMessage['content'] = contentBlocks.map((block) => {
-					if (block.type === 'text') {
-						return { type: 'text' as const, text: block.text } as TextContent;
-					}
-					if (block.type === 'thinking') {
-						return { type: 'thinking' as const, thinking: block.thinking };
-					}
-					const tc = block as {
-						type: 'toolCall';
-						id: string;
-						name: string;
-						arguments: Record<string, unknown>;
-					};
-					return {
-						type: 'toolCall' as const,
-						id: tc.id,
-						name: tc.name,
-						arguments: tc.arguments,
-					} as ToolCall;
-				});
-
-				const assistantMessage: AssistantMessage = {
-					role: 'assistant',
-					content,
-					api: resolvedApi as AssistantMessage['api'],
-					provider: config.modelProvider || 'proxy',
-					model: config.modelId || 'proxy',
-					usage: zeroUsage,
-					stopReason: 'stop',
-					timestamp: Date.now(),
-				};
-
-				eventStream.push({ type: 'done', reason: 'stop', message: assistantMessage });
-				eventStream.end(assistantMessage);
-			})
-			.catch((err: Error) => {
-				logger.error({ err }, '[agent-runner] LLM stream error');
-				const errorMessage: AssistantMessage = {
-					role: 'assistant',
-					content: [],
-					api: resolvedApi as AssistantMessage['api'],
-					provider: config.modelProvider || 'proxy',
-					model: config.modelId || 'proxy',
-					usage: zeroUsage,
-					stopReason: 'error',
-					errorMessage: err.message,
-					timestamp: Date.now(),
-				};
-				eventStream.push({ type: 'error', reason: 'error', error: errorMessage });
-				eventStream.end(errorMessage);
-			});
-
-		return eventStream;
-	};
+	// lastResponseText / streamError are updated on every LLM call so the conclusion backstop
+	// after waitForIdle() can force a final message (empty text) or fail the turn (proxy error)
+	// instead of the loop going idle silently and the turn being marked "completed".
+	let lastResponseText = '';
+	let streamError: Error | null = null;
+	const streamFn = createProxyStreamFn(
+		{ config, proxyClient },
+		{
+			onResponseText: (text) => {
+				lastResponseText = text;
+			},
+			onError: (err) => {
+				streamError = err;
+			},
+		},
+	);
 
 	// ── Load conversation history ─────────────────────────────────────────────
 	logger.debug({ threadId: config.threadId }, '[agent-runner] loading message history');
@@ -740,19 +675,27 @@ export async function runAgent(
 			await agent.continue();
 		}
 
-		// ── Tool limit follow-up ────────────────────────────────────────────────
-		// If the hard tool-call cap was hit, steer the agent to produce a final
-		// response. The steer message is injected after the loop has already stopped
-		// (terminate:true was returned), so this triggers exactly one additional LLM
-		// call that generates an honest answer for the user.
 		await agent.waitForIdle();
 
-		// ── Mission wake conclusion backstop ─────────────────────────────────────
-		// An autonomous wake must always leave a readable record. If the model ended
-		// the wake without logging a summary (e.g. it stopped right after run_code or
-		// schedule_next_wake), force ONE follow-up turn to write the mission_log
-		// summary + a closing note. Skipped when it already logged or completed the
-		// mission, and only for autonomous wakes (steering chats are triggerType 'chat').
+		// ── Conclusion backstop (terminal ordering — error first) ────────────────
+		// The pi-agent loop goes idle whenever the last assistant message has no tool
+		// calls (or the tool cap blocked further calls). It does NOT guarantee that
+		// idle turn produced any visible text, and it never throws on a proxied LLM
+		// error. Left alone, both end the turn silently and it is marked "completed".
+		// The steps below guarantee every turn ends with a conclusion: a surfaced
+		// error, a forced final message, or a fallback note + failure.
+
+		// 1. A proxied LLM error wins over everything — never spend a forced turn or
+		//    emit a misleading bubble on top of a real failure. Thrown inside this try
+		//    so the finally still records skill traces (turnSucceeded=false), then it
+		//    propagates → index.ts → exit 1 → thread 'error'.
+		if (streamError) throw streamError;
+
+		// 2. Mission-wake summary backstop. An autonomous wake must leave a readable
+		//    record; if it ended without logging a summary (e.g. it stopped right after
+		//    run_code or schedule_next_wake), force ONE follow-up turn. Only for
+		//    autonomous wakes (steering chats are triggerType 'chat').
+		let forcedConclusion = false;
 		if (config.triggerType === 'mission' && config.mission) {
 			const wroteSummary = toolLog.some(
 				(t) => t.name === 'mission_log' || t.name === 'mission_complete',
@@ -762,14 +705,52 @@ export async function runAgent(
 					{ threadId: config.threadId },
 					'[agent-runner] mission wake produced no summary — forcing conclusion',
 				);
-				await agent.prompt(
-					'Before this wake ends: call mission_log ONCE with a concise summary of what you ' +
+				await forceTextConclusion(agent, {
+					directive:
+						'Before this wake ends: call mission_log ONCE with a concise summary of what you ' +
 						'did this wake, what you found or accomplished, and what remains for next time. ' +
 						'If you have not scheduled your next wake yet, call schedule_next_wake now. ' +
 						'Then reply with a one-line closing note. Do not start new work.',
-				);
-				await agent.waitForIdle();
+					getText: () => lastResponseText,
+				});
+				forcedConclusion = true;
+				if (streamError) throw streamError; // the forced call can itself error
 			}
+		}
+
+		// 3. Generic empty-text backstop — fire at most once. If the turn produced no
+		//    visible text (empty/thinking-only completion, a max-tokens truncation, or a
+		//    tool-cap block whose forced reply came back empty), steer one final turn to
+		//    produce an honest conclusion for the user.
+		if (!lastResponseText.trim() && !forcedConclusion) {
+			logger.info(
+				{ threadId: config.threadId },
+				'[agent-runner] turn ended with no assistant text — forcing a conclusion',
+			);
+			await forceTextConclusion(agent, {
+				directive:
+					'You ended your turn without replying to the user. Provide a brief final message ' +
+					'now: summarise what you did, or if you could not complete the task say so plainly ' +
+					'and state what you need. Do not start new tool work.',
+				getText: () => lastResponseText,
+			});
+			forcedConclusion = true;
+			if (streamError) throw streamError; // the forced call can itself error
+		}
+
+		// 3b. Chat double-empty fallback (user decision: bubble + error status). If even
+		//     the forced turn produced no text, write a synthetic closing note so the
+		//     transcript still shows a bubble, then fail the turn so it is flagged as an
+		//     error rather than a deceptive "completed".
+		if (!lastResponseText.trim()) {
+			logger.warn(
+				{ threadId: config.threadId },
+				'[agent-runner] no assistant text even after a forced conclusion — writing fallback note and failing the turn',
+			);
+			await proxyClient.appendAssistantNote(
+				"I wasn't able to produce a response for this turn — please try again or rephrase your request.",
+			);
+			throw new Error('Agent turn produced no assistant text after a forced conclusion.');
 		}
 
 		turnSucceeded = true;

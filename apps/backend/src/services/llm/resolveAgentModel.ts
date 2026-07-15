@@ -73,6 +73,14 @@ export async function resolveAgentModel(
 	};
 	const contextWindow = catalogEntry?.contextLength ?? 128000;
 
+	// Max OUTPUT tokens. Derived from the catalog's real per-model limit
+	// (topProvider.maxCompletionTokens, e.g. 64000 for Sonnet) — NOT a fixed 4096,
+	// which starved reasoning models: Anthropic's max_tokens includes the thinking
+	// budget, so a 4096 cap left ~1024 tokens for the answer + tool call and truncated
+	// tool-call arguments mid-JSON. This is a ceiling, not a reservation — the model
+	// still stops when done. Fall back to a generous default when the catalog is unsure.
+	const maxOutputTokens = catalogEntry?.topProvider?.maxCompletionTokens ?? 8192;
+
 	// Declare the model's real input modalities so vision models actually receive
 	// image content blocks (e.g. browser screenshots in tool results). Previously
 	// hardcoded to ['text'], which made pi-ai strip every image before the request.
@@ -99,7 +107,7 @@ export async function resolveAgentModel(
 			cacheWrite: perMillion(catalogEntry?.pricing.cacheWritePerToken),
 		},
 		contextWindow,
-		maxTokens: 4096,
+		maxTokens: maxOutputTokens,
 		// Prefer a user-supplied baseUrl; otherwise fall back to the provider's fixed
 		// default (e.g. OpenRouter / NVIDIA) so those work with just an API key.
 		baseUrl:
@@ -109,4 +117,24 @@ export async function resolveAgentModel(
 	};
 
 	return { model, apiKey: secretData.apiKey };
+}
+
+/**
+ * Build the pi-ai auth options for a resolved model.
+ *
+ * Bedrock's `bedrock-converse-stream` API ignores `options.apiKey` entirely — it
+ * authenticates from `options.bearerToken` (an AWS Bedrock API key) or the AWS SDK
+ * default credential chain. So for amazon-bedrock we route the stored key to
+ * `bearerToken`; without this a user-supplied Bedrock API key is dropped and the
+ * SDK throws "Could not load credentials from any providers". All other providers
+ * use `apiKey`.
+ */
+export function buildProviderAuthOptions(
+	model: Model<string>,
+	apiKey: string,
+): Record<string, unknown> {
+	if (model.provider.toLowerCase() === 'amazon-bedrock') {
+		return { bearerToken: apiKey };
+	}
+	return { apiKey };
 }

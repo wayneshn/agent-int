@@ -3,6 +3,7 @@
 	import UserAvatar from './UserAvatar.svelte';
 	import ThinkingBlock from './ThinkingBlock.svelte';
 	import ToolCallIndicator from './ToolCallIndicator.svelte';
+	import ToolCallGroup, { type ToolCallRowData } from './ToolCallGroup.svelte';
 	import MarkdownRenderer from './MarkdownRenderer.svelte';
 	import ImageBlock from './ImageBlock.svelte';
 	import ChatAttachment from './ChatAttachment.svelte';
@@ -213,6 +214,56 @@
 	}
 
 	/**
+	 * A tool-call segment: either a group of ordinary tool calls (rendered as one
+	 * connected rail) or a render_ui block (rendered as the generated UI itself).
+	 * Consecutive ordinary tool calls coalesce into one 'tools' segment; a 'ui'
+	 * segment breaks the run so overall block order is preserved.
+	 */
+	type ToolCallSegment =
+		| { kind: 'tools'; rows: ToolCallRowData[] }
+		| { kind: 'ui'; id: string; code: string; streaming: boolean };
+
+	let toolCallSegments = $derived.by<ToolCallSegment[]>(() => {
+		const segs: ToolCallSegment[] = [];
+		for (const block of toolCallBlocks) {
+			const argsJson =
+				toolCallArgs[block.id]?.argsJson ??
+				(Object.keys(block.arguments).length > 0
+					? JSON.stringify(block.arguments, null, 2)
+					: undefined);
+			const uiRejected = toolResults[block.id]?.startsWith('The UI was NOT rendered') ?? false;
+			if (block.name === 'render_ui' && !uiRejected) {
+				const uiCode = extractUiCode(argsJson, block.arguments);
+				if (uiCode) {
+					segs.push({ kind: 'ui', id: block.id, code: uiCode, streaming: false });
+					continue;
+				}
+				const liveCode = streamingUiCode[block.id];
+				if (liveCode) {
+					segs.push({ kind: 'ui', id: block.id, code: liveCode, streaming: true });
+					continue;
+				}
+			}
+			const display = resolveToolDisplay(block.name, argsJson);
+			const row: ToolCallRowData = {
+				id: block.id,
+				toolName: block.name,
+				toolDisplayName: display.toolDisplayName,
+				argsJson,
+				result: toolResults[block.id],
+				images: toolResultImages[block.id],
+				isRunning: isStreaming && !toolResults[block.id],
+				iconUrl: display.type === 'img' ? display.url : undefined,
+				iconComponent: display.type === 'icon' ? display.component : undefined
+			};
+			const last = segs[segs.length - 1];
+			if (last && last.kind === 'tools') last.rows.push(row);
+			else segs.push({ kind: 'tools', rows: [row] });
+		}
+		return segs;
+	});
+
+	/**
 	 * Detect a UI form-submission message. OpenUiBlock sends interactions as
 	 * "<label>\n\n```json\n<data>\n```" (the JSON is the agent-facing payload);
 	 * for display we show the label in the bubble and the data in an expandable
@@ -268,49 +319,19 @@
 					/>
 				{/each}
 
-				<!-- Tool call indicators.
-				 argsJson: prefer live tool_call_delta data; fall back to the arguments
-				 stored in the content block itself (populated from DB for historical messages).
-				 result: only available from live tool_call_end events during the current session.
-			-->
-				{#each toolCallBlocks as block (block.id)}
-					{@const argsJson =
-						toolCallArgs[block.id]?.argsJson ??
-						(Object.keys(block.arguments).length > 0
-							? JSON.stringify(block.arguments, null, 2)
-							: undefined)}
-					{@const uiCode =
-						block.name === 'render_ui' ? extractUiCode(argsJson, block.arguments) : undefined}
-					{@const liveCode = block.name === 'render_ui' ? streamingUiCode[block.id] : undefined}
-					{@const uiRejected =
-						toolResults[block.id]?.startsWith('The UI was NOT rendered') ?? false}
-					{#if uiCode && !uiRejected}
-						<!-- render_ui — show the generated UI itself instead of a tool indicator -->
+				<!-- Tool calls. Each round's ordinary tool calls render as one connected
+				 vertical-rail group (ToolCallGroup); render_ui calls render as the
+				 generated UI itself, inline and in order (see toolCallSegments). -->
+				{#each toolCallSegments as seg (seg.kind === 'ui' ? seg.id : seg.rows[0].id)}
+					{#if seg.kind === 'ui'}
 						<OpenUiBlock
-							code={uiCode}
-							disabled={isStreaming}
-							onSendMessage={(t) => onUiAction?.(t)}
-						/>
-					{:else if liveCode && !uiRejected}
-						<!-- render_ui still streaming — render the code-so-far progressively -->
-						<OpenUiBlock
-							code={liveCode}
-							streaming
-							disabled
+							code={seg.code}
+							streaming={seg.streaming}
+							disabled={seg.streaming || isStreaming}
 							onSendMessage={(t) => onUiAction?.(t)}
 						/>
 					{:else}
-						{@const display = resolveToolDisplay(block.name, argsJson)}
-						<ToolCallIndicator
-							toolName={block.name}
-							toolDisplayName={display.toolDisplayName}
-							{argsJson}
-							result={toolResults[block.id]}
-							images={toolResultImages[block.id]}
-							isRunning={isStreaming && !toolResults[block.id]}
-							iconUrl={display.type === 'img' ? display.url : undefined}
-							iconComponent={display.type === 'icon' ? display.component : undefined}
-						/>
+						<ToolCallGroup rows={seg.rows} />
 					{/if}
 				{/each}
 

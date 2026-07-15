@@ -1,13 +1,13 @@
 import * as nodeCron from 'node-cron';
 import { eq, and, desc, sql, lt } from 'drizzle-orm';
 import { complete, type UserMessage, type TextContent } from '@earendil-works/pi-ai';
-import { getSkillCatalogEntry } from '@repo/utils';
+import { getSkillCatalogEntry, extractJsonValue } from '@repo/utils';
 import { db } from '../db/index.js';
 import { agentExecutionTraces, agentEvolvedSkills } from '../db/schema/index.js';
 import { AgentService } from './AgentService.js';
 import { LlmProviderService } from './LlmProviderService.js';
 import { SkillService } from './SkillService.js';
-import { resolveAgentModel } from './llm/resolveAgentModel.js';
+import { resolveAgentModel, buildProviderAuthOptions } from './llm/resolveAgentModel.js';
 import { logger } from '../config/logger.js';
 
 // ─── Tunables (env-overridable) ───────────────────────────────────────────────
@@ -269,7 +269,7 @@ export class SkillEvolutionService {
 				messages: [userMsg],
 				tools: [],
 			},
-			{ apiKey },
+			buildProviderAuthOptions(model, apiKey),
 		);
 
 		const rawText = response.content
@@ -279,22 +279,16 @@ export class SkillEvolutionService {
 			.trim();
 		if (!rawText) return false;
 
-		// Strip markdown code fences in case the model added them despite instructions
-		const cleaned = rawText
-			.replace(/^```(?:json)?\s*/i, '')
-			.replace(/\s*```$/, '')
-			.trim();
-
-		let parsed: ReflectionReply;
-		try {
-			parsed = JSON.parse(cleaned) as ReflectionReply;
-		} catch {
+		// Recover the JSON value even if the model wrapped it in prose or ```json fences.
+		const extracted = extractJsonValue(rawText);
+		if (extracted === null) {
 			logger.warn(
-				{ agentId, skillName, rawText: cleaned.slice(0, 200) },
+				{ agentId, skillName, rawText: rawText.slice(0, 200) },
 				'[skill-evolution] reflection returned non-JSON — skipping pair',
 			);
 			return false;
 		}
+		const parsed = extracted as ReflectionReply;
 
 		if (!parsed.shouldUpdate) {
 			logger.debug(

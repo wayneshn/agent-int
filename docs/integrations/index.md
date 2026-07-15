@@ -83,7 +83,7 @@ Some integrations can also **start a [workflow](/guide/workflows/)** when someth
 | [ClickUp](/integrations/clickup)                       | Personal API token              |
 | [Coda](/integrations/coda)                             | API token                       |
 | [Confluence](/integrations/confluence)                 | Email + API token               |
-| [Dropbox](/integrations/dropbox)                       | Access token                    |
+| [Dropbox](/integrations/dropbox)                       | Access token or OAuth2          |
 | [Google Calendar](/integrations/google)                | OAuth2 (Google)                 |
 | [Google Docs](/integrations/google)                    | OAuth2 (Google)                 |
 | [Google Drive](/integrations/google)                   | OAuth2 (Google, custom scopes)  |

@@ -20,6 +20,14 @@ const workflowStepErrorHandlingSchema = z.object({
 	fallbackAction: z.enum(['stop', 'continue']).optional(),
 });
 
+// Conditions have two branches, so 'continue' has no well-defined target — they
+// are retry-then-stop only.
+const conditionErrorHandlingSchema = z.object({
+	action: z.enum(['stop', 'retry']),
+	/** Only used when action === 'retry'. Must be between 1 and 10 */
+	maxRetries: z.number().int().min(1).max(10).optional(),
+});
+
 export const workflowStepSchema = z.object({
 	id: z.uuid('Step id must be a valid UUID'),
 	name: z.string().min(1, 'Step name is required').max(255),
@@ -93,6 +101,7 @@ const conditionNodeDataSchema = z
 		evalMode: evalModeSchema.optional(),
 		prompt: z.string().optional(),
 		filter: filterValueSchema.optional(),
+		errorHandling: conditionErrorHandlingSchema.optional(),
 	})
 	.superRefine((data, ctx) => {
 		const mode = data.evalMode ?? 'smart';

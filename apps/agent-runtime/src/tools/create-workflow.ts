@@ -157,8 +157,19 @@ export function createCreateWorkflowTool(ctx: ToolContext): AgentTool {
 								errorHandlingAction: Type.Optional(
 									Type.Union(
 										[Type.Literal('stop'), Type.Literal('continue'), Type.Literal('retry')],
-										{ description: 'agent: on failure — stop (default), continue, or retry.' },
+										{
+											description:
+												'on failure — stop (default), continue, or retry. agent: all three apply. ' +
+												'condition: only stop or retry (retry-then-stop; "continue" is treated as stop ' +
+												'since a condition has two branches).',
+										},
 									),
+								),
+								maxRetries: Type.Optional(
+									Type.Number({
+										description:
+											'agent/condition: retry count when errorHandlingAction is "retry" (default 1, max 10).',
+									}),
 								),
 								next: Type.Optional(
 									Type.String({

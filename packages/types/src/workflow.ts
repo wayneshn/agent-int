@@ -169,6 +169,21 @@ export interface WorkflowTriggerNodeData {
  */
 export type WorkflowEvalMode = 'smart' | 'manual';
 
+/**
+ * Error handling for a condition node. Unlike a step (single 'out' path), a
+ * condition has two branches, so there is no well-defined 'continue' target —
+ * conditions are retry-then-stop only.
+ */
+export interface WorkflowConditionErrorHandling {
+	/**
+	 * 'stop': halt the run if evaluation fails (default).
+	 * 'retry': re-evaluate up to `maxRetries` times, then stop if still failing.
+	 */
+	action: 'stop' | 'retry';
+	/** Only relevant when action === 'retry'. Default: 1 */
+	maxRetries?: number;
+}
+
 export interface WorkflowConditionNodeData {
 	/** Display name for the condition node. */
 	name: string;
@@ -178,6 +193,8 @@ export interface WorkflowConditionNodeData {
 	prompt?: string;
 	/** manual mode: deterministic field comparison choosing the 'true'/'false' output. */
 	filter?: FilterValue;
+	/** Retry-on-failure behaviour. Omitted → treated as { action: 'stop' }. */
+	errorHandling?: WorkflowConditionErrorHandling;
 }
 
 export interface WorkflowLoopNodeData {
@@ -276,6 +293,11 @@ export interface WorkflowSpecNode {
 	/** agent: grant all credentials assigned to the agent (overrides allowedCredentialIds). */
 	allCredentials?: boolean;
 	errorHandlingAction?: 'stop' | 'continue' | 'retry';
+	/**
+	 * Retry count when errorHandlingAction === 'retry' (default 1). Applies to agent
+	 * steps and conditions. For conditions, 'continue' is not supported (retry-then-stop).
+	 */
+	maxRetries?: number;
 	/** agent / loop: key of the next node after this one (omit to end this path). */
 	next?: string;
 
@@ -374,6 +396,12 @@ export interface WorkflowRun {
 	triggerId?: string;
 	triggerPayload?: Record<string, unknown>;
 	error?: string;
+	/**
+	 * True when this run was started from the builder's Test mode (a real run with a
+	 * user-supplied/fetched trigger payload). Test runs are excluded from the normal runs
+	 * history so scheduled/production runs stay clean.
+	 */
+	isTest?: boolean;
 	startedAt: Date;
 	completedAt?: Date;
 }
@@ -525,3 +553,24 @@ export type WorkflowDeleteResponse = ApiResponse<{ deleted: boolean }>;
 export type WorkflowRunResponse = ApiResponse<WorkflowRun>;
 export type WorkflowRunsListResponse = ApiResponse<{ runs: WorkflowRun[]; total: number }>;
 export type WorkflowStepLogsListResponse = ApiResponse<WorkflowStepLog[]>;
+
+/**
+ * Request body for starting a Test-mode run from the builder.
+ * `stopAfterNodeId` present ⇒ a per-node "Run to here" partial run (the workflow runs from
+ * the trigger up to and including that node); absent ⇒ the full workflow.
+ */
+export interface WorkflowTestRunRequestBody {
+	/** The seed trigger payload (user-pasted JSON or a fetched app sample). */
+	payload: Record<string, unknown>;
+	/** Optional node id to stop after (per-node test). */
+	stopAfterNodeId?: string;
+}
+
+/** Identifiers of the run a Test-mode request started. */
+export interface WorkflowTestRunResult {
+	runId: string;
+	workflowId: string;
+	threadId: string;
+}
+
+export type WorkflowTestRunResponse = ApiResponse<WorkflowTestRunResult>;

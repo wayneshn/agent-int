@@ -103,7 +103,6 @@
 		{agent}
 		{workflow}
 		credentials={data.credentials}
-		allCredentials={data.allCredentials}
 		definitions={data.definitions}
 		browserAvailable={data.browserAvailable}
 		toolCatalog={data.toolCatalog}

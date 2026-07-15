@@ -61,8 +61,12 @@ export function createCallApiTool(ctx: ToolContext): AgentTool {
 			'pass an empty string "" as credentialId. ' +
 			'Request body (choose at most ONE): "body" for text/JSON; "bodyFile" (a workspace file path) ' +
 			'to send a file as the raw binary body — set its Content-Type via headers (e.g. application/pdf); ' +
-			'or "multipart" for multipart/form-data uploads — an array of parts where each part has a "name" ' +
-			'and either a "value" (text field) or a "file" (workspace file path); do NOT set Content-Type for multipart. ' +
+			'or "multipart" for file uploads — an array of parts where each part has a "name" and either a ' +
+			'"value" (text field) or a "file" (workspace file path); do NOT set a Content-Type header for multipart. ' +
+			'By default multipart is multipart/form-data. For APIs that need multipart/related (e.g. a Google Drive ' +
+			'multipart upload), set "multipartSubtype":"related" and pass parts IN ORDER — typically a JSON metadata ' +
+			'part ({"name":"metadata","value":"{...}","contentType":"application/json"}) then the file part ' +
+			'({"name":"media","file":"path","contentType":"application/pdf"}); set contentType on every related part. ' +
 			'To download binary (PDF, image, zip), set "responseFile" to a workspace path and the response bytes ' +
 			'are saved there instead of returned as text. ' +
 			'IMPORTANT: Never use a credential for a service it does not belong to. ' +
@@ -110,9 +114,17 @@ export function createCallApiTool(ctx: ToolContext): AgentTool {
 					}),
 					{
 						description:
-							'multipart/form-data parts. Each part has a name and either a value (text) or a file (workspace path).',
+							'Multipart parts. Each part has a name and either a value (text) or a file (workspace path). ' +
+							'For multipart/related, order matters and each part should set contentType.',
 					},
 				),
+			),
+			multipartSubtype: Type.Optional(
+				Type.Union([Type.Literal('form-data'), Type.Literal('related')], {
+					description:
+						"Multipart subtype (default 'form-data'). Use 'related' for multipart/related uploads " +
+						'like Google Drive; parts are sent in order (metadata part then media part).',
+				}),
 			),
 			responseFile: Type.Optional(
 				Type.String({
@@ -138,6 +150,7 @@ export function createCallApiTool(ctx: ToolContext): AgentTool {
 					filename?: string;
 					contentType?: string;
 				}>;
+				multipartSubtype?: 'form-data' | 'related';
 				responseFile?: string;
 			};
 
@@ -195,10 +208,15 @@ export function createCallApiTool(ctx: ToolContext): AgentTool {
 								contentType: part.contentType ?? 'application/octet-stream',
 							});
 						} else {
-							parts.push({ name: part.name, value: part.value ?? '' });
+							// Carry contentType on text parts too — multipart/related needs it
+							// (e.g. the application/json metadata part). form-data ignores it.
+							parts.push({ name: part.name, value: part.value ?? '', contentType: part.contentType });
 						}
 					}
 					request.multipart = parts;
+					if (p.multipartSubtype === 'related') {
+						request.multipartSubtype = 'related';
+					}
 				} else if (p.body) {
 					// Text body — enforce the UTF-8 text cap as before.
 					if (Buffer.byteLength(p.body, 'utf-8') > maxBodyBytes) {
@@ -222,7 +240,13 @@ export function createCallApiTool(ctx: ToolContext): AgentTool {
 					credentialId: request.credentialId || '(none)',
 					method: p.method,
 					url: p.url,
-					mode: p.bodyFile ? 'bodyFile' : p.multipart ? 'multipart' : 'body',
+					mode: p.bodyFile
+						? 'bodyFile'
+						: p.multipart
+							? p.multipartSubtype === 'related'
+								? 'multipart/related'
+								: 'multipart'
+							: 'body',
 					responseFile: p.responseFile ?? undefined,
 				},
 				'[agent-runner] call_api executing',

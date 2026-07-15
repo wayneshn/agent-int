@@ -1,4 +1,4 @@
-import { pgTable, pgEnum, uuid, text, jsonb, timestamp, index } from 'drizzle-orm/pg-core';
+import { pgTable, pgEnum, uuid, text, jsonb, timestamp, boolean, index } from 'drizzle-orm/pg-core';
 import { agents } from './agents.js';
 import { workflows } from './workflows.js';
 import { agentTriggerTypeEnum } from './agentThreads.js';
@@ -43,6 +43,12 @@ export const workflowRuns = pgTable(
 		triggerId: uuid('trigger_id'),
 		/** Payload delivered to the workflow when it was triggered */
 		triggerPayload: jsonb('trigger_payload'),
+		/**
+		 * True when this run was started from the builder's Test mode (a real run seeded with a
+		 * user-supplied/fetched payload). Excluded from the normal runs history so scheduled/
+		 * production runs stay clean.
+		 */
+		isTest: boolean('is_test').notNull().default(false),
 		/** Error message if the run failed at the workflow level */
 		error: text('error'),
 		/** When the run started (= when this row was created) */

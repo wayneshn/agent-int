@@ -1,0 +1,66 @@
+id: dropbox-oauth2
+name: Dropbox (OAuth2)
+brandName: Dropbox
+type: oauth2
+icon: /logos/dropbox.svg
+description: >
+  Connect to Dropbox via OAuth2 — recommended for production or multi-user access.
+  Create a scoped app in the Dropbox App Console, enable the scopes you need, and add
+  the OAuth redirect URI. Also powers the knowledge base cloud import.
+documentationUrl: https://developers.dropbox.com/oauth-guide
+
+properties:
+  - name: clientId
+    displayName: App Key (Client ID)
+    type: string
+    required: true
+    description: >
+      The App key from your Dropbox app's Settings tab in the App Console.
+  - name: clientSecret
+    displayName: App Secret (Client Secret)
+    type: secret
+    required: true
+    description: >
+      The App secret from your Dropbox app's Settings tab.
+  - name: scope
+    displayName: Scopes
+    type: string
+    required: true
+    default: 'account_info.read files.metadata.read files.content.read files.content.write sharing.read'
+    description: >
+      Space-separated Dropbox scopes. Each must be enabled on your app under the
+      Permissions tab in the App Console, or authorization will fail.
+  - name: appAccessType
+    displayName: App Access Type
+    type: options
+    required: true
+    default: app_folder
+    description: >
+      Choose the same access type you selected when creating your Dropbox app.
+      "App Folder" grants access only to a folder named after your app.
+      "Full Dropbox" grants access to the user's entire Dropbox.
+    options:
+      - name: App Folder
+        value: app_folder
+      - name: Full Dropbox
+        value: full_dropbox
+
+oauth2:
+  authorizationUrl: 'https://www.dropbox.com/oauth2/authorize'
+  accessTokenUrl: 'https://api.dropboxapi.com/oauth2/token'
+  clientIdProperty: clientId
+  clientSecretProperty: clientSecret
+  authStyle: inBody
+  # Dropbox issues a refresh token only when token_access_type=offline is requested
+  # on the authorization URL; without it the access token expires after ~4 hours.
+  extraAuthParams:
+    token_access_type: offline
+
+requestMapping:
+  headers:
+    Authorization: 'Bearer {{properties.accessToken}}'
+
+testRequest:
+  method: POST
+  url: https://api.dropboxapi.com/2/users/get_current_account
+  accountIdentifierKey: email

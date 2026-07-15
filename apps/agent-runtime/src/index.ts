@@ -45,7 +45,11 @@ async function main(): Promise<void> {
 
 	logger.info({ agentId, threadId, proxyHost, workspaceRoot }, '[agent-runtime] starting');
 
-	const proxyClient = new ProxyClient(proxyHost, proxyToken, threadId);
+	// Optional — when present, ProxyClient exchanges it for a fresh access token and
+	// retries on a 401, so long/workflow runs survive the 15-minute access-token TTL.
+	const proxyRefreshToken = process.env.PROXY_REFRESH_TOKEN;
+
+	const proxyClient = new ProxyClient(proxyHost, proxyToken, threadId, proxyRefreshToken);
 
 	try {
 		const config = await proxyClient.loadConfig();

@@ -56,6 +56,8 @@ export function createRunCodeTool(ctx: ToolContext): AgentTool {
 		label: 'Run Code',
 		description:
 			'Execute a code snippet in a sandboxed subprocess and return stdout + stderr. ' +
+			'Both `code` and `language` are REQUIRED — always put the full source in `code` and select `language` in the SAME tool call. ' +
+			'Never call this tool with only `language`: a call missing `code` is invalid and will fail validation. ' +
 			'Use ONLY when execution is genuinely needed to produce a result you cannot derive from your own knowledge — ' +
 			'e.g. parsing data, computing a hash, running a calculation, file manipulation. ' +
 			'NEVER use this tool to echo or print information you already know. ' +
@@ -63,15 +65,18 @@ export function createRunCodeTool(ctx: ToolContext): AgentTool {
 			`Supported languages: ${Object.keys(RUNTIMES).join(', ')}. ` +
 			`Execution is killed after ${TIMEOUT_MS / 1000} seconds.`,
 		parameters: Type.Object({
+			code: Type.String({
+				description:
+					'REQUIRED. The actual source code to execute — the real, complete program text, ' +
+					'not a description or placeholder. Multi-line strings are supported. ' +
+					'Do not invoke run_code without this field.',
+			}),
 			language: Type.Union(
 				Object.keys(RUNTIMES).map((lang) => Type.Literal(lang)),
 				{
 					description: `Programming language: ${Object.keys(RUNTIMES).join(' | ')}`,
 				},
 			),
-			code: Type.String({
-				description: 'The code to execute. Multi-line strings are supported.',
-			}),
 		}),
 		execute: async (_toolCallId, params) => {
 			const { language, code } = params as { language: string; code: string };

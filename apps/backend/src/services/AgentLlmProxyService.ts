@@ -1,4 +1,5 @@
 import { stream, complete, type UserMessage, type TextContent } from '@earendil-works/pi-ai';
+import { extractJsonValue } from '@repo/utils';
 import type { LlmProxyRequest, AgentStreamEvent, SandboxTokenPayload } from '@repo/types';
 import { AgentProxyService } from './AgentProxyService.js';
 import { LlmProviderService } from './LlmProviderService.js';
@@ -8,7 +9,11 @@ import { AgentStreamBus } from './AgentStreamBus.js';
 import { AgentSessionService } from './AgentSessionService.js';
 import { AgentMemoryService } from './AgentMemoryService.js';
 import { MissionService } from './MissionService.js';
-import { resolveAgentModel, type ResolvedAgentModel } from './llm/resolveAgentModel.js';
+import {
+	resolveAgentModel,
+	buildProviderAuthOptions,
+	type ResolvedAgentModel,
+} from './llm/resolveAgentModel.js';
 import { logger } from '../config/logger.js';
 import { v4 as uuidv4 } from 'uuid';
 import type { ContentBlock, MessageTokenUsage, AgentMessageRole, AgentThread } from '@repo/types';
@@ -50,9 +55,16 @@ export class AgentLlmProxyService {
 	 * Execute an LLM completion on behalf of a child process.
 	 * Streams events to the AgentStreamBus and persists the final message.
 	 *
-	 * Returns the full assistant message content for the child to continue its tool loop.
+	 * Returns the full assistant message content for the child to continue its tool loop,
+	 * plus the normalized stopReason (diagnostic — lets the runtime distinguish a genuine
+	 * empty 'stop' from a truncated 'length' end). Throws when the provider stream emits an
+	 * `error` event so the failure surfaces to the child instead of being swallowed as an
+	 * empty, "successful" completion.
 	 */
-	async executeStream(proxyToken: string, request: LlmProxyRequest): Promise<unknown[]> {
+	async executeStream(
+		proxyToken: string,
+		request: LlmProxyRequest,
+	): Promise<{ content: unknown[]; stopReason?: string }> {
 		// Validate token
 		const tokenPayload = await this.agentProxyService.verifyProxyToken(proxyToken);
 
@@ -128,8 +140,31 @@ export class AgentLlmProxyService {
 			'[llm-proxy] calling pi-ai stream()',
 		);
 
-		// Build stream options. apiKey is required so pi-ai doesn't look in env vars.
-		const streamOptions: Record<string, unknown> = { apiKey };
+		// Build stream options. Auth is passed explicitly so pi-ai doesn't look in env
+		// vars — for most providers that's apiKey; Bedrock reads bearerToken instead.
+		const streamOptions: Record<string, unknown> = buildProviderAuthOptions(model, apiKey);
+
+		// Forced structured output: when the sandbox requests a specific tool be called
+		// (workflow schema finalization), translate it into the provider-native tool_choice so
+		// the reply is a structured tool call rather than free text. pi-ai wires options.toolChoice
+		// for anthropic / openai-completions / google / bedrock / mistral; the OpenAI Responses and
+		// Azure APIs do not read it in this version, so those fall back to text extraction.
+		if (request.forceToolName) {
+			const hasTool = (context.tools as ReadonlyArray<{ name?: string }>).some(
+				(t) => t.name === request.forceToolName,
+			);
+			const toolChoice = hasTool
+				? this.forcedToolChoice(model.api, request.forceToolName)
+				: undefined;
+			if (toolChoice !== undefined) {
+				streamOptions.toolChoice = toolChoice;
+			} else {
+				logger.debug(
+					{ api: model.api, forceToolName: request.forceToolName },
+					'[llm-proxy] forceToolName requested but provider lacks tool_choice support — ignoring',
+				);
+			}
+		}
 
 		const isGoogle = model.provider.toLowerCase() === 'google';
 
@@ -192,6 +227,12 @@ export class AgentLlmProxyService {
 		// Collect content blocks for persistence and return
 		const contentBlocks: ContentBlock[] = [];
 		let currentTextBlock: { type: 'text'; text: string } | null = null;
+		// Normalized stop reason from the provider (diagnostic — surfaces 'length'/'error').
+		let finalStopReason: string | undefined;
+		// Track a provider `error` event so we can throw AFTER the stream drains rather than
+		// silently returning the (usually empty) content collected so far. See the throw below.
+		let sawError = false;
+		let lastErrorMessage = '';
 		// Per-contentIndex throttle for render_ui_partial snapshots (progressive UI).
 		const uiPartialLastEmit = new Map<number, number>();
 
@@ -300,6 +341,7 @@ export class AgentLlmProxyService {
 
 				case 'done': {
 					const finalMsg = event.message;
+					finalStopReason = finalMsg.stopReason;
 					const usage: MessageTokenUsage | undefined = finalMsg.usage
 						? {
 								input: finalMsg.usage.input,
@@ -383,16 +425,30 @@ export class AgentLlmProxyService {
 						{ agentId: tokenPayload.agentId, error: event.error.errorMessage },
 						'[llm-proxy] LLM stream error',
 					);
+					sawError = true;
+					lastErrorMessage = event.error.errorMessage ?? 'LLM stream error';
+					finalStopReason = 'error';
 					this.streamBus.emit(tokenPayload.threadId, {
 						type: 'error',
-						message: event.error.errorMessage ?? 'LLM stream error',
+						message: lastErrorMessage,
 					});
 					break;
 			}
 		}
 
-		// Return the collected content blocks so the child process can continue its tool loop
-		return contentBlocks;
+		// A provider `error` event previously left this method returning the (usually empty)
+		// content collected so far with success — the child then saw an empty completion and
+		// ended its tool loop silently, marking the turn "completed". Instead, throw so the
+		// route returns 500 and the child's llmStream() rejects and can fail the turn honestly.
+		// Emit message_end first so the browser SSE handler unlocks the input either way.
+		if (sawError) {
+			this.streamBus.emit(tokenPayload.threadId, { type: 'message_end', messageId });
+			throw new Error(lastErrorMessage || 'LLM stream error');
+		}
+
+		// Return the collected content blocks (+ diagnostic stop reason) so the child process
+		// can continue its tool loop.
+		return { content: contentBlocks, stopReason: finalStopReason };
 	}
 
 	/**
@@ -445,7 +501,7 @@ export class AgentLlmProxyService {
 					messages: [titleUserMsg],
 					tools: [],
 				},
-				{ apiKey },
+				buildProviderAuthOptions(model, apiKey),
 			);
 
 			let title = '';
@@ -591,7 +647,7 @@ export class AgentLlmProxyService {
 				messages: [summaryUserMsg],
 				tools: [],
 			},
-			{ apiKey },
+			buildProviderAuthOptions(model, apiKey),
 		);
 
 		const summary = response.content
@@ -789,7 +845,7 @@ export class AgentLlmProxyService {
 					messages: [extractUserMsg],
 					tools: [],
 				},
-				{ apiKey },
+				buildProviderAuthOptions(model, apiKey),
 			);
 
 			const rawText = response.content
@@ -806,25 +862,19 @@ export class AgentLlmProxyService {
 				return;
 			}
 
-			// Strip markdown code fences in case the model added them despite instructions
-			const cleaned = rawText
-				.replace(/^```(?:json)?\s*/i, '')
-				.replace(/\s*```$/, '')
-				.trim();
-
-			let parsed: {
-				hasNewMemory: boolean;
-				memories?: Array<{ content: string; memoryType: string }>;
-			};
-			try {
-				parsed = JSON.parse(cleaned) as typeof parsed;
-			} catch {
+			// Recover the JSON value even if the model wrapped it in prose or ```json fences.
+			const extractedMemory = extractJsonValue(rawText);
+			if (extractedMemory === null) {
 				logger.debug(
-					{ agentId, rawText: cleaned.slice(0, 200) },
+					{ agentId, rawText: rawText.slice(0, 200) },
 					'[llm-proxy] summarize: LLM returned non-JSON — skipping',
 				);
 				return;
 			}
+			const parsed = extractedMemory as {
+				hasNewMemory: boolean;
+				memories?: Array<{ content: string; memoryType: string }>;
+			};
 
 			if (!parsed.hasNewMemory || !Array.isArray(parsed.memories) || parsed.memories.length === 0) {
 				logger.debug({ agentId, prevThreadId }, '[llm-proxy] summarize: no new memories to store');
@@ -888,6 +938,30 @@ export class AgentLlmProxyService {
 			source: 'mission_summary',
 			missionId,
 		});
+	}
+
+	/**
+	 * Map a "force this tool" request to the provider-native tool_choice value pi-ai expects.
+	 * Named-tool forcing where supported (Anthropic / OpenAI completions / Bedrock); "any" mode
+	 * elsewhere (Google / Mistral) which, with a single tool present, still forces that tool.
+	 * Returns undefined for APIs pi-ai does not wire tool_choice into (OpenAI Responses, Azure,
+	 * Codex), so the caller leaves generation unconstrained and the runtime falls back to text
+	 * extraction. Keyed on the pi-ai API id (model.api), see PROVIDER_TO_PI_API.
+	 */
+	private forcedToolChoice(api: string, name: string): Record<string, unknown> | string | undefined {
+		switch (api) {
+			case 'anthropic-messages':
+			case 'bedrock-converse-stream':
+				return { type: 'tool', name };
+			case 'openai-completions':
+				return { type: 'function', function: { name } };
+			case 'google-generative-ai':
+			case 'google-vertex':
+			case 'mistral-conversations':
+				return 'any';
+			default:
+				return undefined;
+		}
 	}
 
 	/**

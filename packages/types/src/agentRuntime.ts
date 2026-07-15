@@ -261,19 +261,23 @@ export interface AgentTrigger {
  * directly without injecting any authentication. Use this for public APIs.
  */
 /**
- * One part of a multipart/form-data request body (see ProxyRequest.multipart).
+ * One part of a multipart request body (see ProxyRequest.multipart).
  * A part is either a plain text field (`value`) or a file part (`dataBase64`).
+ *
+ * In `multipartSubtype: 'related'` mode, parts are emitted in array order and a
+ * non-file part uses `value` + `contentType` (e.g. an `application/json` metadata
+ * part); `name`/`filename` are `form-data`-only and ignored for `related`.
  */
 export interface ProxyMultipartPart {
-	/** Form field name */
+	/** Form field name (form-data only; ignored for multipart/related) */
 	name: string;
 	/** Text field value. Set this XOR dataBase64. */
 	value?: string;
 	/** File part content, base64-encoded. Set this XOR value. */
 	dataBase64?: string;
-	/** File name for a file part (Content-Disposition filename) */
+	/** File name for a file part (Content-Disposition filename; form-data only) */
 	filename?: string;
-	/** MIME type for a file part (defaults to application/octet-stream) */
+	/** MIME type for the part (defaults to application/octet-stream) */
 	contentType?: string;
 }
 
@@ -298,11 +302,18 @@ export interface ProxyRequest {
 	 */
 	bodyEncoding?: 'text' | 'base64';
 	/**
-	 * multipart/form-data parts. When set, the host builds a FormData request body
-	 * (letting fetch set the Content-Type boundary) — used for file uploads with
-	 * accompanying text fields. Mutually exclusive with `body`.
+	 * Multipart parts. When set, the host builds a multipart request body and sets the
+	 * Content-Type (with an auto-generated boundary) — used for file uploads. Mutually
+	 * exclusive with `body`. The subtype is controlled by `multipartSubtype`.
 	 */
 	multipart?: ProxyMultipartPart[];
+	/**
+	 * Multipart subtype for `multipart`. 'form-data' (default) builds a standard
+	 * multipart/form-data body (FormData). 'related' builds a multipart/related body —
+	 * parts emitted in order (e.g. a JSON metadata part then a media part), as required
+	 * by APIs like Google Drive's multipart upload. Ignored when `multipart` is unset.
+	 */
+	multipartSubtype?: 'form-data' | 'related';
 	/**
 	 * How the host should return the response body. 'text' (default) = UTF-8 text.
 	 * 'base64' = the host reads the response as raw bytes and returns them
@@ -336,6 +347,16 @@ export interface LlmProxyRequest {
 	systemPrompt: string;
 	tools?: unknown[]; // pi-ai Tool[]
 	thinkingLevel?: 'off' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+	/**
+	 * When set, the host forces the model to call this exact tool (provider-native
+	 * tool_choice), so the reply is a structured tool call rather than free text. Used
+	 * by the workflow runner's structured-output finalization: the forced tool's input
+	 * schema is the step's expectedResponseSchema, so the JSON arrives as tool-call
+	 * arguments that cannot contain prose. Ignored for providers without tool-choice
+	 * support (the runner falls back to text extraction). The named tool must be present
+	 * in `tools`.
+	 */
+	forceToolName?: string;
 }
 
 // ─── Browser Protocol ─────────────────────────────────────────────────────────
@@ -406,6 +427,13 @@ export interface SandboxTokenPayload {
 	 * attributes LLM cost to the mission's budget. Never taken from a request body.
 	 */
 	missionId?: string;
+	/**
+	 * Token kind. `access` (or absent, for backward compatibility) is the
+	 * short-lived PROXY_TOKEN accepted on /internal/* routes. `refresh` is the
+	 * longer-lived token that may ONLY be exchanged for a fresh access token via
+	 * POST /v1/runtime/refresh-token — it is rejected on /internal/*.
+	 */
+	type?: 'access' | 'refresh';
 	iat: number;
 	exp: number;
 }
@@ -539,6 +567,18 @@ export interface AgentRuntimeConfig {
 		runId: string;
 		definition: Workflow;
 		triggerContext: WorkflowTriggerContext;
+		/**
+		 * Test-mode "run only this step": execute ONLY this node (n8n's "Execute node"). Its
+		 * `{{steps.<id>.output}}` / implicit-predecessor inputs are resolved from `seededOutputs`
+		 * (outputs captured by a prior test run) — ancestors are NOT re-run. If a required
+		 * upstream output is missing, the node fails with a "depends on previous step" error.
+		 * Absent ⇒ run the whole workflow.
+		 */
+		testNode?: {
+			nodeId: string;
+			/** nodeId → that node's captured outputData, from a prior test run. */
+			seededOutputs: Record<string, Record<string, unknown>>;
+		};
 	};
 	/**
 	 * Present when this turn belongs to a mission — either an autonomous wake

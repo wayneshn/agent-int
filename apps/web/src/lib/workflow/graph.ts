@@ -51,7 +51,8 @@ export function defaultConditionData(): WorkflowConditionNodeData {
 		name: 'Condition',
 		evalMode: 'smart',
 		prompt: '',
-		filter: { combinator: 'and', conditions: [] }
+		filter: { combinator: 'and', conditions: [] },
+		errorHandling: { action: 'stop' }
 	};
 }
 
@@ -164,11 +165,17 @@ export function edgeVisual(
 	existingLabel?: string
 ): { type: string; label: string | undefined } {
 	const sh = sourceHandle ?? '';
-	if (sh === 'true' || sh === 'false' || sh === 'loop' || sh === 'done') {
+	// The loop body's first node connects out from the 'loop' handle ("loop start");
+	// its last node connects back into 'loopBack' ("loop end"). Keep these edge labels
+	// in sync with the handle labels on LoopNode so connections read clearly.
+	if (sh === 'loop') {
+		return { type: 'smoothstep', label: existingLabel ?? 'loop start' };
+	}
+	if (sh === 'true' || sh === 'false' || sh === 'done') {
 		return { type: 'smoothstep', label: existingLabel ?? sh };
 	}
 	if (targetHandle === 'loopBack') {
-		return { type: 'smoothstep', label: existingLabel ?? 'loop back' };
+		return { type: 'smoothstep', label: existingLabel ?? 'loop end' };
 	}
 	return { type: 'smoothstep', label: existingLabel };
 }

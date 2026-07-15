@@ -98,6 +98,8 @@ export interface WorkflowSpawnConfig {
 	runId: string;
 	definition: Workflow;
 	triggerContext: WorkflowTriggerContext;
+	/** Test-mode "run only this step": execute just this node with seeded upstream outputs. */
+	testNode?: { nodeId: string; seededOutputs: Record<string, Record<string, unknown>> };
 }
 
 /**
@@ -569,15 +571,19 @@ export class AgentRuntimeService {
 			? (await this.credentialService.listByOwner(ownerId)).map((c) => c.id)
 			: agent.credentialIds;
 
-		// Issue a scoped PROXY_TOKEN for this runtime session
-		const proxyToken = await this.proxyService.issueProxyToken({
+		// Issue a scoped PROXY_TOKEN for this runtime session, plus a longer-lived
+		// refresh token so the sandbox can self-heal an expired access token on a 401
+		// (long/workflow runs routinely outlive the 15-minute access TTL).
+		const tokenScope = {
 			agentId,
 			ownerId,
 			threadId,
 			credentialIds: effectiveCredentialIds,
 			allCredentials: agent.allCredentials,
 			missionId: effectiveMissionConfig?.missionId,
-		});
+		};
+		const proxyToken = await this.proxyService.issueProxyToken(tokenScope);
+		const proxyRefreshToken = await this.proxyService.issueRefreshToken(tokenScope);
 
 		// Mark thread as running before spawning
 		await this.sessionService.updateThreadStatus(threadId, 'running');
@@ -589,6 +595,7 @@ export class AgentRuntimeService {
 			AGENT_ID: agentId,
 			THREAD_ID: threadId,
 			PROXY_TOKEN: proxyToken,
+			PROXY_REFRESH_TOKEN: proxyRefreshToken,
 		};
 
 		// Pass the config inline via env when it is small; otherwise stash it for the
@@ -997,6 +1004,9 @@ export class AgentRuntimeService {
 							runId: workflowConfig.runId,
 							definition: workflowConfig.definition,
 							triggerContext: workflowConfig.triggerContext,
+							...(workflowConfig.testNode !== undefined
+								? { testNode: workflowConfig.testNode }
+								: {}),
 						},
 					}
 				: {}),

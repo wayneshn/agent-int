@@ -4,6 +4,7 @@ import type {
 	AppTriggerProvidersResponse,
 	AppTriggerRegistrationResponse,
 	AppTriggerResourcesResponse,
+	AppTriggerSampleResponse,
 } from '@repo/types';
 import { requireAuth } from '../middleware/auth.js';
 import { logger } from '../config/logger.js';
@@ -109,6 +110,65 @@ export function createAppTriggersRouter(
 			logger.warn({ err, providerId, resourceType }, '[app-trigger] resource listing failed');
 			const message = err instanceof Error ? err.message : 'Resource listing failed.';
 			const body: AppTriggerResourcesResponse = { success: false, error: message };
+			res.status(502).json(body);
+		}
+	});
+
+	router.post('/:providerId/sample', auth, async (req: Request, res: Response) => {
+		const ownerId = req.user?.sub;
+		if (!ownerId) {
+			res.status(401).json({ success: false, error: 'Unauthorized' });
+			return;
+		}
+		const { providerId } = req.params as { providerId: string };
+		const { credentialId, event, params } = req.body as {
+			credentialId?: string;
+			event?: string;
+			params?: Record<string, unknown>;
+		};
+
+		const provider = registry.getById(providerId);
+		if (!provider) {
+			res.status(404).json({ success: false, error: 'Unknown provider' });
+			return;
+		}
+		if (!credentialId || !event) {
+			res.status(400).json({ success: false, error: 'credentialId and event are required' });
+			return;
+		}
+		// Inbound-only providers (Notion, Slack) can't be sampled — the builder falls back to
+		// a user-pasted JSON payload. Return a friendly null rather than erroring.
+		if (!provider.fetchLatestEvent) {
+			const body: AppTriggerSampleResponse = { success: true, data: null };
+			res.json(body);
+			return;
+		}
+
+		const credential = await credentialService.getById(credentialId, ownerId);
+		if (!credential) {
+			res.status(404).json({ success: false, error: 'Credential not found' });
+			return;
+		}
+		if (!registry.isCompatible(provider, credential.type)) {
+			res.status(400).json({
+				success: false,
+				error: `Credential type '${credential.type}' is not compatible with provider '${provider.id}'.`,
+			});
+			return;
+		}
+
+		try {
+			const ctx = buildProviderContext(resolver, credentialService, credentialId, ownerId);
+			const eventData = await provider.fetchLatestEvent(ctx, event, params ?? {});
+			const body: AppTriggerSampleResponse = {
+				success: true,
+				data: eventData ? { payload: eventData.payload, occurredAt: eventData.occurredAt } : null,
+			};
+			res.json(body);
+		} catch (err) {
+			logger.warn({ err, providerId, event }, '[app-trigger] sample fetch failed');
+			const message = err instanceof Error ? err.message : 'Sample fetch failed.';
+			const body: AppTriggerSampleResponse = { success: false, error: message };
 			res.status(502).json(body);
 		}
 	});

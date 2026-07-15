@@ -169,6 +169,13 @@
       "when": 1783793442998,
       "tag": "0023_workable_drax",
       "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "7",
+      "when": 1783936906688,
+      "tag": "0024_silky_azazel",
+      "breakpoints": true
     }
   ]
 }

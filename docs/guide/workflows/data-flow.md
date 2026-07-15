@@ -31,6 +31,8 @@ You usually don't need to wire anything. By default, **every step, condition, an
 
 This includes each node's **result only**, never the tool calls it made internally. A condition or loop in **smart** mode uses this same context to make its decision.
 
+**Inside a loop body**, a step with no input mapping instead receives the **current item** (the same value as <code v-pre>{{loop.item}}</code>) plus its index — so each iteration processes one element. Reference earlier steps or the trigger from a loop body with an explicit input mapping.
+
 ## Input mapping (override)
 
 To control exactly what a step receives, set its **Input mapping** — a template that **replaces** the automatic context with only what you map:

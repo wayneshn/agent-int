@@ -313,6 +313,27 @@ export function createWorkflowsRouter(
 	});
 
 	/**
+	 * GET /v1/agents/:agentId/workflows/:id/runs/:runId
+	 * Fetch a single run by id (ownership-checked). Test runs are excluded from the runs LIST,
+	 * so the builder's Test-mode poller reads their status through this endpoint.
+	 */
+	router.get('/:id/runs/:runId', auth, async (req: Request, res: Response) => {
+		const ownerId = req.user?.sub;
+		if (!ownerId) {
+			res.status(401).json({ success: false, error: 'Unauthorized' });
+			return;
+		}
+		const { runId } = req.params as { runId: string };
+
+		const run = await workflowRunService.getRunById(runId, ownerId);
+		if (!run) {
+			res.status(404).json({ success: false, error: 'Run not found' });
+			return;
+		}
+		res.json({ success: true, data: run });
+	});
+
+	/**
 	 * GET /v1/agents/:agentId/workflows/:id/runs/:runId/steps
 	 * Get step logs for a specific run.
 	 */
@@ -326,6 +347,51 @@ export function createWorkflowsRouter(
 
 		const stepLogs = await workflowRunService.getStepLogs(runId, ownerId);
 		res.json({ success: true, data: stepLogs });
+	});
+
+	/**
+	 * POST /v1/agents/:agentId/workflows/:id/test-run
+	 * Start a Test-mode run of the workflow with a caller-supplied trigger payload.
+	 * Body: { payload, testNodeId?, seededOutputs? }
+	 * `testNodeId` present ⇒ run ONLY that node ("Execute node") using `seededOutputs`
+	 * (nodeId → prior-run outputData); absent ⇒ full workflow.
+	 * Runs even when the workflow is disabled; the run is marked is_test and hidden from history.
+	 */
+	router.post('/:id/test-run', auth, async (req: Request, res: Response) => {
+		const ownerId = req.user?.sub;
+		if (!ownerId) {
+			res.status(401).json({ success: false, error: 'Unauthorized' });
+			return;
+		}
+		const { id } = req.params as { id: string };
+		const { payload, testNodeId, seededOutputs } = req.body as {
+			payload?: Record<string, unknown>;
+			testNodeId?: string;
+			seededOutputs?: Record<string, Record<string, unknown>>;
+		};
+
+		const workflow = await workflowService.getById(id, ownerId);
+		if (!workflow) {
+			res.status(404).json({ success: false, error: 'Workflow not found' });
+			return;
+		}
+		if (!workflow.trigger) {
+			res.status(400).json({ success: false, error: 'Workflow has no trigger to test.' });
+			return;
+		}
+
+		try {
+			const result = await triggerService.fireTestRun(workflow.trigger.id, ownerId, payload ?? {}, {
+				testNode: testNodeId
+					? { nodeId: testNodeId, seededOutputs: seededOutputs ?? {} }
+					: undefined,
+			});
+			res.status(201).json({ success: true, data: result });
+		} catch (err) {
+			const message = err instanceof Error ? err.message : 'Test run failed to start';
+			logger.warn({ err, workflowId: id }, '[workflows] test run failed to start');
+			res.status(502).json({ success: false, error: message });
+		}
 	});
 
 	return router;

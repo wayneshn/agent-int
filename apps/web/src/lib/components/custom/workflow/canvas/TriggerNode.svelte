@@ -1,6 +1,7 @@
 <script lang="ts">
 	import { Handle, Position, type NodeProps } from '@xyflow/svelte';
 	import type { TriggerNodeRender } from '$lib/workflow/graph';
+	import NodeTestOverlay from './NodeTestOverlay.svelte';
 	import PlayIcon from '@lucide/svelte/icons/play';
 	import ClockIcon from '@lucide/svelte/icons/clock';
 	import WebhookIcon from '@lucide/svelte/icons/webhook';
@@ -8,7 +9,7 @@
 
 	/** Entry node for the workflow. Its real config lives on workflow.trigger; this
 	 *  node is a visual anchor whose `data.kind` drives the badge/icon. */
-	let { data, selected }: NodeProps = $props();
+	let { id, data, selected }: NodeProps = $props();
 
 	const kind = $derived((data as TriggerNodeRender).kind ?? 'manual');
 
@@ -24,7 +25,7 @@
 </script>
 
 <div
-	class="w-52 rounded-lg border-2 bg-card shadow-sm transition-colors {selected
+	class="relative w-52 rounded-lg border-2 bg-card shadow-sm transition-colors {selected
 		? 'border-primary ring-1 ring-primary'
 		: 'border-primary/40 hover:border-primary/60'}"
 >
@@ -39,6 +40,8 @@
 			<p class="truncate text-sm font-medium text-foreground">{meta.label}</p>
 		</div>
 	</div>
+
+	<NodeTestOverlay {id} kind="trigger" />
 </div>
 
 <!-- Trigger has only an output handle (it is the entry point) -->

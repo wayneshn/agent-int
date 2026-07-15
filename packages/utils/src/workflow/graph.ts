@@ -200,6 +200,11 @@ export function specToGraph(spec: WorkflowSpec): { nodes: WorkflowNode[]; edges:
 					evalMode: 'smart',
 					prompt: rewriteRefs(n.prompt, idByKey) ?? '',
 					filter: { combinator: 'and', conditions: [] },
+					// Conditions are retry-then-stop only — any non-'retry' action maps to 'stop'.
+					errorHandling:
+						n.errorHandlingAction === 'retry'
+							? { action: 'retry', maxRetries: n.maxRetries ?? 1 }
+							: { action: 'stop' },
 				},
 			});
 			const t = refId(n.ifTrue, `Condition "${n.name}" (true)`);
@@ -242,7 +247,10 @@ export function specToGraph(spec: WorkflowSpec): { nodes: WorkflowNode[]; edges:
 					allTools: n.allTools ?? false,
 					allowedCredentialIds: n.allowedCredentialIds ?? [],
 					allCredentials: n.allCredentials ?? false,
-					errorHandling: { action: n.errorHandlingAction ?? 'stop' },
+					errorHandling: {
+						action: n.errorHandlingAction ?? 'stop',
+						...(n.errorHandlingAction === 'retry' ? { maxRetries: n.maxRetries ?? 1 } : {}),
+					},
 				},
 			});
 			const next = bodyKeys.has(n.key) ? undefined : refId(n.next, `Step "${n.name}"`);

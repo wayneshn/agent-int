@@ -5,6 +5,8 @@ export { resolveProviderApi, PROVIDER_TO_PI_API } from './llm-provider-api-map.j
 
 export { EMAIL_REGEX, normalizeEmail, isValidEmail } from './validation.js';
 
+export { extractJsonValue } from './json-extract.js';
+
 export {
 	loadCredentialDefinitions,
 	getCredentialDefinition,

@@ -56,8 +56,7 @@ export class GoogleFormsTriggerProvider implements AppTriggerProvider {
 						label: 'Form ID',
 						type: 'string',
 						required: true,
-						description:
-							'The form id from its edit URL: docs.google.com/forms/d/<FORM_ID>/edit',
+						description: 'The form id from its edit URL: docs.google.com/forms/d/<FORM_ID>/edit',
 						placeholder: '1FAIpQLSc...',
 					},
 				],
@@ -87,7 +86,10 @@ export class GoogleFormsTriggerProvider implements AppTriggerProvider {
 
 		// First run: establish a baseline without replaying historical responses.
 		if (cursor === undefined) {
-			return { events: [], stateUpdate: { cursor: newest, lastPolledAt: new Date().toISOString() } };
+			return {
+				events: [],
+				stateUpdate: { cursor: newest, lastPolledAt: new Date().toISOString() },
+			};
 		}
 
 		const events: NormalizedAppEvent[] = responses
@@ -98,6 +100,30 @@ export class GoogleFormsTriggerProvider implements AppTriggerProvider {
 			events,
 			stateUpdate: { cursor: newest || cursor, lastPolledAt: new Date().toISOString() },
 		};
+	}
+
+	/**
+	 * Fetch the newest form response for a Test seed — side-effect-free (no cursor write).
+	 * Cannot reuse `poll()` (it returns events:[] on first run by design); lists unfiltered and
+	 * picks the response with the latest submission time.
+	 */
+	async fetchLatestEvent(
+		ctx: AppTriggerProviderContext,
+		_eventId: string,
+		params: Record<string, unknown>,
+	): Promise<NormalizedAppEvent | null> {
+		const formId = this.requireFormId(params);
+		const responses = await this.fetchResponses(ctx, formId, undefined);
+		let latest: FormsResponse | undefined;
+		let latestTs = '';
+		for (const r of responses) {
+			const ts = r.lastSubmittedTime ?? r.createTime ?? '';
+			if (!latest || ts > latestTs) {
+				latest = r;
+				latestTs = ts;
+			}
+		}
+		return latest ? this.normalize(formId, latest) : null;
 	}
 
 	private async fetchResponses(

@@ -116,6 +116,17 @@ export interface AppTriggerProviderInfo {
 	setupNote?: string;
 }
 
+/**
+ * A single latest real event fetched from an app source, used to seed a workflow Test run.
+ * The browser-safe projection of the backend's NormalizedAppEvent: only the normalized
+ * payload (plus an optional occurredAt) crosses the wire. `null` when the source is empty
+ * or the provider is inbound-only (Notion/Slack) and cannot be sampled.
+ */
+export interface AppTriggerSample {
+	payload: Record<string, unknown>;
+	occurredAt?: string;
+}
+
 // ─── API Response Envelopes ───────────────────────────────────────────────────
 
 export type AppTriggerProvidersResponse = ApiResponse<AppTriggerProviderInfo[]>;
@@ -123,3 +134,5 @@ export type AppTriggerProvidersResponse = ApiResponse<AppTriggerProviderInfo[]>;
 export type AppTriggerResourcesResponse = ApiResponse<AppTriggerResourcesPage>;
 
 export type AppTriggerRegistrationResponse = ApiResponse<AppTriggerRegistrationStatus>;
+
+export type AppTriggerSampleResponse = ApiResponse<AppTriggerSample | null>;

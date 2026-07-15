@@ -4,7 +4,9 @@
 	import WorkflowStepConfigForm from '../WorkflowStepConfigForm.svelte';
 	import TriggerConfigPanel from './TriggerConfigPanel.svelte';
 	import ConditionConfigForm from './ConditionConfigForm.svelte';
-	import LoopConfigForm from './LoopConfigForm.svelte';
+	import LoopConfigForm, { type LoopSource } from './LoopConfigForm.svelte';
+	import RunDataView from './RunDataView.svelte';
+	import { testRun } from '$lib/workflow/test-run.svelte.js';
 	import { Button } from '$lib/components/ui/button/index.js';
 	import CopyIcon from '@lucide/svelte/icons/copy';
 	import type {
@@ -54,6 +56,8 @@
 		// Condition / loop
 		condition: WorkflowConditionNodeData | null;
 		loop: WorkflowLoopNodeData | null;
+		/** Upstream nodes (trigger + ancestors) offered as the loop's items source. */
+		loopSources?: LoopSource[];
 		onSaveCondition: (data: WorkflowConditionNodeData) => void;
 		onSaveLoop: (data: WorkflowLoopNodeData) => void;
 		// Trigger (seed values — drafted internally, committed via onSaveTrigger)
@@ -68,7 +72,6 @@
 		appPollIntervalSec: number | undefined;
 		onSaveTrigger: (draft: TriggerDraft) => void;
 		providers: AppTriggerProviderInfo[];
-		allCredentials: CredentialMetadata[];
 		webhookSecret: string | null;
 		webhookUrl: string | null;
 		triggerId: string | null;
@@ -88,6 +91,7 @@
 		onSaveStep,
 		condition,
 		loop,
+		loopSources = [],
 		onSaveCondition,
 		onSaveLoop,
 		triggerKind,
@@ -101,7 +105,6 @@
 		appPollIntervalSec,
 		onSaveTrigger,
 		providers,
-		allCredentials,
 		webhookSecret,
 		webhookUrl,
 		triggerId,
@@ -216,6 +219,14 @@
 		</Sheet.Header>
 
 		<div class="min-h-0 flex-1 overflow-y-auto px-6 py-4">
+			<!-- Test-run data for this node, shown above the config when a test run exists. -->
+			{#if testRun.active && nodeId}
+				{#if nodeType === 'trigger'}
+					<RunDataView seedPayload={testRun.seedPayload} />
+				{:else if testRun.logByNodeId[nodeId]}
+					<RunDataView log={testRun.logByNodeId[nodeId]} />
+				{/if}
+			{/if}
 			{#if showRef}
 				<div
 					class="mb-4 flex items-center gap-2 rounded-md border border-border bg-muted/40 px-2.5 py-1.5"
@@ -252,7 +263,7 @@
 				{/key}
 			{:else if nodeType === 'loop' && loop}
 				{#key nodeId}
-					<LoopConfigForm {loop} onChange={(d) => (pendingLoop = d)} />
+					<LoopConfigForm {loop} sources={loopSources} onChange={(d) => (pendingLoop = d)} />
 				{/key}
 			{:else if nodeType === 'trigger'}
 				<TriggerConfigPanel
@@ -266,7 +277,7 @@
 					bind:appParams={dAppParams}
 					bind:appPollIntervalSec={dAppPollIntervalSec}
 					{providers}
-					{allCredentials}
+					{credentials}
 					{webhookSecret}
 					{webhookUrl}
 					{triggerId}

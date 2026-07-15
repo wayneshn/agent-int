@@ -24,6 +24,8 @@
 	const VAR_STEP_ID = '{{steps.<nodeId>.output}}';
 	const VAR_STEP_FIELD = '{{steps.<nodeId>.output.field}}';
 	const VAR_STEP_INDEX = '{{steps.0.output}}';
+	const VAR_LOOP_ITEM = '{{loop.item}}';
+	const VAR_LOOP_INDEX = '{{loop.index}}';
 	const SCHEMA_PLACEHOLDER =
 		'{\n  "type": "object",\n  "properties": {\n    "result": { "type": "string" }\n  }\n}';
 
@@ -195,7 +197,10 @@
 			with dot paths, e.g.
 			<code class="rounded bg-muted px-1 py-0.5 text-xs">{VAR_STEP_FIELD}</code>
 			(legacy <code class="rounded bg-muted px-1 py-0.5 text-xs">{VAR_STEP_INDEX}</code> also works).
-			Copy a node's “Output ref” from its panel. Leave empty to auto-inject the previous step's output.
+			Inside a loop body use <code class="rounded bg-muted px-1 py-0.5 text-xs">{VAR_LOOP_ITEM}</code>
+			/ <code class="rounded bg-muted px-1 py-0.5 text-xs">{VAR_LOOP_INDEX}</code> (these also work in
+			the instruction above). Copy a node's “Output ref” from its panel. Leave empty and, inside a
+			loop, the step auto-receives the current item; otherwise it gets the previous step's output.
 		</p>
 	</div>
 

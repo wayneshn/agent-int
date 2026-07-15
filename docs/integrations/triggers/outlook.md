@@ -2,12 +2,12 @@
 
 Fire a [workflow](/guide/workflows/) when a new email arrives in an Outlook.com, Hotmail, or Microsoft 365 mailbox. Like the [Gmail trigger](/integrations/triggers/gmail), Valmis **polls** the Microsoft Graph mail API on an interval (default every 60 seconds) — nothing beyond an authorized Microsoft Outlook credential is required, and it works on `localhost`.
 
-|                |                                                                                      |
-| -------------- | ------------------------------------------------------------------------------------ |
-| **Event**      | New email received                                                                   |
-| **Delivery**   | Polling (default every 60s, configurable in the builder)                             |
-| **Credential** | [Microsoft Outlook](/integrations) (OAuth2) — needs the `Mail.Read` scope            |
-| **Payload**    | `{ from, to, subject, snippet, body, receivedAt, messageId, threadId, labels, raw }` |
+|                |                                                                                             |
+| -------------- | ------------------------------------------------------------------------------------------- |
+| **Event**      | New email received                                                                          |
+| **Delivery**   | Polling (default every 60s, configurable in the builder)                                    |
+| **Credential** | [Microsoft Outlook](/integrations/microsoft-outlook) (OAuth2) — needs the `Mail.Read` scope |
+| **Payload**    | `{ from, to, subject, snippet, body, receivedAt, messageId, threadId, labels, raw }`        |
 
 Outlook.com, Hotmail, and Live mailboxes all use the same Microsoft Graph API, so this one trigger covers all of them through a Microsoft Outlook credential.
 

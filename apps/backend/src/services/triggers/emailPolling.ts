@@ -306,6 +306,17 @@ export abstract class EmailPollingTriggerProvider implements AppTriggerProvider 
 		id: string,
 	): Promise<NormalizedAppEvent | null>;
 
+	/**
+	 * List the ids of the newest messages, newest-first, with NO time filter and a single page
+	 * (small cap). Used only by `fetchLatestEvent` to seed a Test run — never by polling. Kept
+	 * separate from `listSince` because "latest" has no watermark: a zero/epoch watermark makes
+	 * some APIs (Gmail `after:0`) return nothing.
+	 */
+	protected abstract listLatestIds(
+		ctx: AppTriggerProviderContext,
+		params: Record<string, unknown>,
+	): Promise<string[]>;
+
 	listEvents(): AppTriggerEventInfo[] {
 		return [buildEmailReceivedEvent(this.eventParams())];
 	}
@@ -321,6 +332,23 @@ export abstract class EmailPollingTriggerProvider implements AppTriggerProvider 
 			fetchAndNormalize: (c, id) => this.fetchAndNormalize(c, id),
 		};
 		return runEmailPoll(adapter, ctx, params, state);
+	}
+
+	/**
+	 * Fetch the newest real message for a Test seed — side-effect-free (no cursor write). Lists the
+	 * newest messages (no time filter) and returns the first that still fetches.
+	 */
+	async fetchLatestEvent(
+		ctx: AppTriggerProviderContext,
+		_eventId: string,
+		params: Record<string, unknown>,
+	): Promise<NormalizedAppEvent | null> {
+		const ids = await this.listLatestIds(ctx, params);
+		for (const id of ids) {
+			const event = await this.fetchAndNormalize(ctx, id);
+			if (event) return event;
+		}
+		return null;
 	}
 
 	/** Providers with dynamic dropdowns (e.g. a Gmail label picker) override this. */

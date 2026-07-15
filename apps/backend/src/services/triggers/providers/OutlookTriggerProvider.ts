@@ -117,6 +117,26 @@ export class OutlookTriggerProvider extends EmailPollingTriggerProvider {
 		return ids;
 	}
 
+	protected async listLatestIds(
+		ctx: AppTriggerProviderContext,
+		params: Record<string, unknown>,
+	): Promise<string[]> {
+		// Newest messages, no time filter, single page.
+		const url = `${GRAPH_API_BASE}/mailFolders/${this.resolveFolder(params)}/messages`;
+		const qs: Record<string, string> = {
+			$orderby: 'receivedDateTime desc',
+			$top: '10',
+			$select: 'id',
+		};
+		const response = await ctx.execute({ method: 'GET', url, qs });
+		if (!response.ok) {
+			const excerpt = await readErrorExcerpt(response);
+			throw new Error(`Outlook messages.list failed (${response.status}): ${excerpt}`);
+		}
+		const body = (await response.json()) as GraphMessageList;
+		return (body.value ?? []).map((m) => m.id);
+	}
+
 	/** Only follow a Graph-issued nextLink that stays on the Graph origin (SSRF guard). */
 	private isGraphUrl(url: string): boolean {
 		try {

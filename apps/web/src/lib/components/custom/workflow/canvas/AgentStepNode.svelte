@@ -2,13 +2,15 @@
 	import { Handle, Position, type NodeProps } from '@xyflow/svelte';
 	import { Badge } from '$lib/components/ui/badge/index.js';
 	import type { AgentNodeRender } from '$lib/workflow/graph';
+	import { testRun, nodeRingClass } from '$lib/workflow/test-run.svelte.js';
+	import NodeTestOverlay from './NodeTestOverlay.svelte';
 	import BotIcon from '@lucide/svelte/icons/bot';
 	import WrenchIcon from '@lucide/svelte/icons/wrench';
 	import KeyIcon from '@lucide/svelte/icons/key';
 	import ShieldAlertIcon from '@lucide/svelte/icons/shield-alert';
 
 	/** Custom Svelte Flow node for an agent step. Data carries the WorkflowStep. */
-	let { data, selected }: NodeProps = $props();
+	let { id, data, selected }: NodeProps = $props();
 
 	const step = $derived((data as AgentNodeRender).step);
 	const toolCount = $derived(step.allowedTools.length);
@@ -22,9 +24,9 @@
 <Handle type="target" position={Position.Left} id="in" />
 
 <div
-	class="w-60 rounded-lg border bg-card shadow-sm transition-colors {selected
+	class="relative w-60 rounded-lg border bg-card shadow-sm transition-colors {selected
 		? 'border-primary ring-1 ring-primary'
-		: 'border-border hover:border-primary/50'}"
+		: `border-border hover:border-primary/50 ${testRun.active ? nodeRingClass(id) : ''}`}"
 >
 	<div class="flex items-center gap-2 border-b border-border px-3 py-2">
 		<div
@@ -32,7 +34,7 @@
 		>
 			<BotIcon class="size-3.5" />
 		</div>
-		<span class="truncate text-sm font-medium text-foreground">
+		<span class="w-3/4 truncate text-sm font-medium text-foreground">
 			{step.name || 'Untitled step'}
 		</span>
 	</div>
@@ -70,6 +72,8 @@
 			{/if}
 		</div>
 	</div>
+
+	<NodeTestOverlay {id} kind="agent" />
 </div>
 
 <Handle type="source" position={Position.Right} id="out" />

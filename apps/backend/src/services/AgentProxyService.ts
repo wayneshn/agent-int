@@ -1,4 +1,5 @@
 import { jwtVerify, SignJWT } from 'jose';
+import { randomBytes } from 'node:crypto';
 import { eq, and } from 'drizzle-orm';
 import type { ProxyRequest, ProxyResponse, SandboxTokenPayload, HitlRequest } from '@repo/types';
 import { CredentialResolverService } from './CredentialResolverService.js';
@@ -56,11 +57,12 @@ export class AgentProxyService {
 	}
 
 	/**
-	 * Issue a PROXY_TOKEN for a container spawn.
-	 * TTL: 15 minutes — sufficient for a typical agent task.
+	 * Build the shared, scoped JWT claims common to access and refresh tokens.
 	 */
-	async issueProxyToken(payload: Omit<SandboxTokenPayload, 'iat' | 'exp'>): Promise<string> {
-		return new SignJWT({
+	private tokenClaims(
+		payload: Omit<SandboxTokenPayload, 'iat' | 'exp' | 'type'>,
+	): Record<string, unknown> {
+		return {
 			agentId: payload.agentId,
 			ownerId: payload.ownerId,
 			threadId: payload.threadId,
@@ -71,7 +73,18 @@ export class AgentProxyService {
 			// Scopes the /internal/mission/* endpoints and attributes LLM cost to the
 			// mission budget. Absent for non-mission turns.
 			missionId: payload.missionId,
-		})
+		};
+	}
+
+	/**
+	 * Issue a short-lived access PROXY_TOKEN for a container spawn.
+	 * TTL: 15 minutes — sufficient for a typical agent task. Longer runs (esp.
+	 * workflows) self-heal by exchanging the refresh token via refresh-token.
+	 */
+	async issueProxyToken(
+		payload: Omit<SandboxTokenPayload, 'iat' | 'exp' | 'type'>,
+	): Promise<string> {
+		return new SignJWT({ ...this.tokenClaims(payload), type: 'access' })
 			.setProtectedHeader({ alg: 'HS256' })
 			.setIssuedAt()
 			.setExpirationTime('15m')
@@ -79,11 +92,45 @@ export class AgentProxyService {
 	}
 
 	/**
-	 * Validate a PROXY_TOKEN and return its decoded payload.
-	 * Throws if the token is invalid, expired, or malformed.
+	 * Issue a longer-lived refresh token, injected into the sandbox alongside the
+	 * access token. It may ONLY be exchanged for a fresh access token (same scope)
+	 * via POST /v1/runtime/refresh-token — never accepted on /internal/*. Its TTL
+	 * is the hard ceiling on how long a single run can keep self-healing.
+	 * Configurable via PROXY_REFRESH_TOKEN_TTL (default 8h).
+	 */
+	async issueRefreshToken(
+		payload: Omit<SandboxTokenPayload, 'iat' | 'exp' | 'type'>,
+	): Promise<string> {
+		const ttl = process.env.PROXY_REFRESH_TOKEN_TTL ?? '8h';
+		return new SignJWT({ ...this.tokenClaims(payload), type: 'refresh' })
+			.setProtectedHeader({ alg: 'HS256' })
+			.setIssuedAt()
+			.setExpirationTime(ttl)
+			.sign(this.proxyTokenSecret);
+	}
+
+	/**
+	 * Validate an access PROXY_TOKEN and return its decoded payload.
+	 * Throws if the token is invalid, expired, malformed, or is a refresh token
+	 * (a long-lived refresh token must never be accepted on /internal/*).
 	 */
 	async verifyProxyToken(token: string): Promise<SandboxTokenPayload> {
 		const { payload } = await jwtVerify(token, this.proxyTokenSecret);
+		if ((payload as { type?: string }).type === 'refresh') {
+			throw new Error('Refresh token cannot be used as an access token');
+		}
+		return payload as unknown as SandboxTokenPayload;
+	}
+
+	/**
+	 * Validate a refresh token and return its decoded payload.
+	 * Throws if the token is invalid, expired, malformed, or is not a refresh token.
+	 */
+	async verifyRefreshToken(token: string): Promise<SandboxTokenPayload> {
+		const { payload } = await jwtVerify(token, this.proxyTokenSecret);
+		if ((payload as { type?: string }).type !== 'refresh') {
+			throw new Error('Not a refresh token');
+		}
 		return payload as unknown as SandboxTokenPayload;
 	}
 
@@ -195,16 +242,73 @@ export class AgentProxyService {
 	}
 
 	/**
+	 * Resolve the outbound headers for a built body: multipart drops any caller Content-Type
+	 * (so form-data's boundary isn't clobbered), and a returned `contentType` (multipart/related)
+	 * is set EXPLICITLY as a header value — header values are preserved verbatim, unlike a Blob's
+	 * `type` which fetch lowercases and would corrupt the mixed-case boundary token.
+	 */
+	private applyOutboundContentType(
+		sanitizedHeaders: Record<string, string> | undefined,
+		outbound: { isMultipart: boolean; contentType?: string },
+	): Record<string, string> | undefined {
+		const base = outbound.isMultipart ? this.stripContentType(sanitizedHeaders) : sanitizedHeaders;
+		if (!outbound.contentType) return base;
+		return { ...(base ?? {}), 'Content-Type': outbound.contentType };
+	}
+
+	/**
+	 * Assemble a multipart/related request body from ordered parts. Unlike form-data,
+	 * each part is a bare section with its own Content-Type (no field names / boundaries
+	 * managed by FormData) — the structure APIs like Google Drive's multipart upload need.
+	 * Returns the raw bytes and the boundary token to advertise in the Content-Type.
+	 */
+	private buildMultipartRelated(request: ProxyRequest): { bytes: Buffer; boundary: string } {
+		// All-lowercase (hex is already lowercase) so no header-normalisation layer can ever
+		// desync the header's boundary token from the body's delimiters.
+		const boundary = `valmisrelated${randomBytes(16).toString('hex')}`;
+		const chunks: Buffer[] = [];
+		for (const part of request.multipart ?? []) {
+			const contentType = part.contentType ?? 'application/octet-stream';
+			chunks.push(Buffer.from(`--${boundary}\r\nContent-Type: ${contentType}\r\n\r\n`, 'utf-8'));
+			chunks.push(
+				part.dataBase64 != null
+					? Buffer.from(part.dataBase64, 'base64')
+					: Buffer.from(part.value ?? '', 'utf-8'),
+			);
+			chunks.push(Buffer.from('\r\n', 'utf-8'));
+		}
+		chunks.push(Buffer.from(`--${boundary}--\r\n`, 'utf-8'));
+		return { bytes: Buffer.concat(chunks), boundary };
+	}
+
+	/**
 	 * Build the outbound fetch body from a ProxyRequest, decoding binary payloads.
-	 *   - multipart → a FormData (fetch sets the multipart Content-Type + boundary)
+	 *   - multipart (form-data) → a FormData (fetch sets the Content-Type + boundary)
+	 *   - multipart (related)   → a Blob whose type carries multipart/related; boundary=…
 	 *   - bodyEncoding 'base64' → raw bytes (Buffer) so binary survives intact
 	 *   - otherwise → the raw string (or undefined)
+	 *
+	 * `isMultipart` means "the body dictates its own Content-Type" — the caller strips any
+	 * caller-supplied Content-Type. For form-data, fetch then emits the FormData type +
+	 * boundary; for related, `contentType` is returned so the caller sets it EXPLICITLY
+	 * (undici lowercases a Blob's `type`, which would corrupt the mixed-case boundary token).
 	 */
 	private buildOutboundBody(request: ProxyRequest): {
 		body: string | Blob | FormData | undefined;
 		isMultipart: boolean;
+		contentType?: string;
 	} {
 		if (request.multipart && request.multipart.length > 0) {
+			if (request.multipartSubtype === 'related') {
+				const { bytes, boundary } = this.buildMultipartRelated(request);
+				// Typeless Blob — the Content-Type (with the exact-case boundary) is set as an
+				// explicit header by the caller, since a Blob.type would be lowercased by fetch.
+				return {
+					body: new Blob([new Uint8Array(bytes)]),
+					isMultipart: true,
+					contentType: `multipart/related; boundary=${boundary}`,
+				};
+			}
 			const form = new FormData();
 			for (const part of request.multipart) {
 				if (part.dataBase64 != null) {
@@ -296,10 +400,9 @@ export class AgentProxyService {
 			}
 
 			const outbound = this.buildOutboundBody(request);
-			// For multipart, drop any Content-Type so fetch writes the correct boundary.
-			const headers = outbound.isMultipart
-				? this.stripContentType(sanitizedHeaders)
-				: sanitizedHeaders;
+			// For multipart, drop any caller Content-Type; form-data lets fetch write the
+			// boundary, while related supplies an explicit Content-Type (exact-case boundary).
+			const headers = this.applyOutboundContentType(sanitizedHeaders, outbound);
 
 			const fetchOptions: RequestInit = {
 				method: request.method,
@@ -372,12 +475,10 @@ export class AgentProxyService {
 			'[proxy] executing authenticated credential proxy request',
 		);
 
-		// Step 4 — build the outbound body (decode base64 / assemble multipart) and,
-		// for multipart, drop Content-Type so fetch writes the boundary.
+		// Step 4 — build the outbound body (decode base64 / assemble multipart) and resolve
+		// its Content-Type (strip for form-data; explicit boundary header for related).
 		const outbound = this.buildOutboundBody(request);
-		const headers = outbound.isMultipart
-			? this.stripContentType(sanitizedHeaders)
-			: sanitizedHeaders;
+		const headers = this.applyOutboundContentType(sanitizedHeaders, outbound);
 
 		// Step 5 — execute via resolver (handles OAuth2 refresh, header injection, etc.)
 		const response = await this.credentialResolver.executeWithCredential(

@@ -178,6 +178,20 @@ export interface AppTriggerProvider {
 		emit: (event: NormalizedAppEvent) => void,
 	): Promise<{ stop: () => Promise<void> }>;
 
+	// ── test/seed sampling (drives the workflow builder's "Fetch latest" test flow) ──
+	/**
+	 * Fetch the single most recent real event, for seeding a workflow Test run. MUST be
+	 * side-effect-free — it does NOT advance the live poll cursor / write any state (unlike
+	 * `poll()`, which baselines + persists a cursor). Returns null when the source is empty.
+	 * Left undefined by inbound-only providers (Notion, Slack) — the test flow then falls
+	 * back to a user-pasted JSON payload.
+	 */
+	fetchLatestEvent?(
+		ctx: AppTriggerProviderContext,
+		eventId: string,
+		params: Record<string, unknown>,
+	): Promise<NormalizedAppEvent | null>;
+
 	// ── dynamic resource listing (drives `type: 'resource'` dropdowns) ──
 	/**
 	 * List selectable resources for a `type: 'resource'` param field, using the

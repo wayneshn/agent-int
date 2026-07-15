@@ -163,6 +163,38 @@ export function createRuntimeRouter(
 	// ─────────────────────────────────────────────────────────────────────────
 
 	/**
+	 * POST /v1/runtime/refresh-token
+	 * Exchange a (longer-lived) refresh token for a fresh short-lived access
+	 * PROXY_TOKEN with identical scope. Deliberately NOT under the /internal prefix
+	 * so it is not gated by the access-token middleware below — the whole point is
+	 * that the sandbox's access token may already be expired. Auth is the refresh
+	 * token itself (Authorization: Bearer). Declared before the :agentId routes.
+	 */
+	router.post('/refresh-token', async (req: Request, res: Response) => {
+		const authHeader = req.headers.authorization;
+		if (!authHeader?.startsWith('Bearer ')) {
+			res.status(401).json({ success: false, error: 'Missing refresh token' });
+			return;
+		}
+		try {
+			const payload = await proxyService.verifyRefreshToken(authHeader.slice(7));
+			// Mint a fresh access token from the verified refresh claims only — never
+			// from the request body — so scope cannot be escalated.
+			const proxyToken = await proxyService.issueProxyToken({
+				agentId: payload.agentId,
+				ownerId: payload.ownerId,
+				threadId: payload.threadId,
+				credentialIds: payload.credentialIds,
+				allCredentials: payload.allCredentials,
+				missionId: payload.missionId,
+			});
+			res.json({ success: true, data: { proxyToken } });
+		} catch {
+			res.status(401).json({ success: false, error: 'Invalid or expired refresh token' });
+		}
+	});
+
+	/**
 	 * Sandbox-internal auth middleware.
 	 * Reads the PROXY_TOKEN from Authorization: Bearer header and verifies it.
 	 * Attaches the decoded payload as req.sandboxToken for downstream handlers.
@@ -366,6 +398,54 @@ export function createRuntimeRouter(
 	});
 
 	/**
+	 * POST /v1/runtime/internal/thread/:threadId/assistant-note
+	 * Sandbox persists a short assistant text message and streams it to the browser.
+	 *
+	 * This is the ONLY way a sandbox may write an assistant-role message. It exists for the
+	 * conclusion backstop: when a turn ends with no model text even after a forced retry, the
+	 * runtime writes a synthetic closing note here (then exits non-zero) so the turn always ends
+	 * with a visible bubble AND is flagged as failed. Scoped to the token's own thread.
+	 */
+	router.post('/internal/thread/:threadId/assistant-note', async (req: Request, res: Response) => {
+		const { threadId } = req.params as { threadId: string };
+		const sandboxToken = (req as Request & { sandboxToken: SandboxTokenPayload }).sandboxToken;
+
+		if (sandboxToken.threadId !== threadId) {
+			res.status(403).json({ success: false, error: 'Thread ID mismatch' });
+			return;
+		}
+
+		const { text } = req.body as { text?: unknown };
+		if (typeof text !== 'string' || text.trim() === '') {
+			res.status(400).json({ success: false, error: 'A non-empty text is required' });
+			return;
+		}
+
+		try {
+			const message = await sessionService.appendMessage({
+				threadId,
+				role: 'assistant',
+				content: [{ type: 'text', text }],
+			});
+
+			// Stream the note to the browser as a normal assistant bubble (message_start →
+			// text_delta → message_end) so it renders live, not only after a reload.
+			agentStreamBus.emit(threadId, {
+				type: 'message_start',
+				messageId: message.id,
+				role: 'assistant',
+			});
+			agentStreamBus.emit(threadId, { type: 'text_delta', messageId: message.id, delta: text });
+			agentStreamBus.emit(threadId, { type: 'message_end', messageId: message.id });
+
+			res.status(201).json({ success: true, data: message });
+		} catch (err) {
+			logger.error({ err, threadId }, '[runtime] failed to append assistant note');
+			res.status(500).json({ success: false, error: 'Failed to append assistant note' });
+		}
+	});
+
+	/**
 	 * POST /v1/runtime/internal/proxy
 	 * Credential proxy — sandbox makes an API call using a resolved credential.
 	 * The PROXY_TOKEN is already verified by the /internal middleware; the token
@@ -402,8 +482,11 @@ export function createRuntimeRouter(
 		const proxyToken = (req.headers.authorization as string).slice(7);
 
 		try {
-			const content = await llmProxyService.executeStream(proxyToken, req.body as LlmProxyRequest);
-			res.json({ success: true, data: { content } });
+			const { content, stopReason } = await llmProxyService.executeStream(
+				proxyToken,
+				req.body as LlmProxyRequest,
+			);
+			res.json({ success: true, data: { content, stopReason } });
 		} catch (err) {
 			const message = err instanceof Error ? err.message : 'LLM proxy failed';
 			logger.error({ err, agentId: sandboxToken.agentId }, '[runtime] LLM proxy failed');

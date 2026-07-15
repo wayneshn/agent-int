@@ -12,12 +12,14 @@ The default. **Items** is a template that resolves to a JSON array; the loop run
 {{steps.<nodeId>.output.items}}
 ```
 
-Inside the body, reference the current element and position with:
+Each iteration runs the body once with a different element. A body step **with no input mapping automatically receives the current item as its input**, so it processes one element per iteration with no extra config. To reference the element or its position explicitly — in the step **instruction** or the **input mapping** — use:
 
 | Variable | Value |
 | -------- | ----- |
 | <code v-pre>{{loop.item}}</code> | The current array element. Drill in with dot paths, e.g. <code v-pre>{{loop.item.email}}</code>. |
 | <code v-pre>{{loop.index}}</code> | The current index, starting at 0. |
+
+Set an explicit input mapping only when the body needs something other than the current item (e.g. <code v-pre>{{steps.&lt;nodeId&gt;.output}}</code> from an earlier step alongside <code v-pre>{{loop.item}}</code>).
 
 ## While condition
 

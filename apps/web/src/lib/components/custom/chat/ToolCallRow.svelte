@@ -1,26 +1,14 @@
 <script lang="ts">
 	import WrenchIcon from '@lucide/svelte/icons/wrench';
 	import ChevronDownIcon from '@lucide/svelte/icons/chevron-down';
-	import CheckIcon from '@lucide/svelte/icons/check';
-	import LoaderCircleIcon from '@lucide/svelte/icons/loader-circle';
 	import { DEFAULT_TOOL_ICON } from './tool-icon-map.js';
 	import ToolCallDetails from './ToolCallDetails.svelte';
 
 	/**
-	 * Expandable tool call strip shown inside assistant messages.
-	 *
-	 * While running (isRunning=true): shows tool name + animated dots.
-	 * After the LLM has formed the call (argsJson present): name is updated.
-	 * After execution (result present): expandable to show args + result.
-	 *
-	 * Icon resolution priority:
-	 *  1. iconUrl  — integration logo image (e.g. /logos/github.svg) for call_api with credential
-	 *  2. iconComponent — Lucide icon constructor from TOOL_ICON_MAP for built-in tools
-	 *  3. DEFAULT_TOOL_ICON (WrenchIcon) — ultimate fallback
-	 *
-	 * Label resolution priority:
-	 *  1. toolDisplayName — pre-formatted label (e.g. "Call Api — GitHub") for call_api
-	 *  2. formatToolName(toolName) — snake_case → title-case formatter fallback
+	 * One tool call rendered as a borderless row inside a ToolCallGroup rail.
+	 * The running/done status lives on the group's rail node, so the row stays
+	 * quiet — just an icon, a label, and (when there's content) an expand chevron
+	 * revealing the args/result panel.
 	 */
 	let {
 		toolName,
@@ -38,7 +26,7 @@
 		toolDisplayName?: string;
 		/** Pretty-printed JSON args the LLM decided to pass — the "thinking context" */
 		argsJson?: string;
-		/** Heading for the argsJson section — defaults to 'Arguments' (tool calls) */
+		/** Heading for the argsJson section — defaults to 'Arguments' */
 		detailsLabel?: string;
 		/** Raw tool execution output returned to the agent */
 		result?: string;
@@ -72,11 +60,10 @@
 	let ResolvedIcon = $derived(iconComponent ?? DEFAULT_TOOL_ICON);
 </script>
 
-<div class="my-1 overflow-hidden rounded-md border border-border/40 bg-muted/20">
-	<!-- Header strip — always visible -->
+<div>
 	<button
 		type="button"
-		class="flex w-full items-center gap-2 px-2 py-1.5 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/40 disabled:pointer-events-none"
+		class="group/row flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left text-xs text-muted-foreground transition-colors hover:bg-muted/30 hover:text-foreground disabled:pointer-events-none"
 		onclick={() => canExpand && (expanded = !expanded)}
 		disabled={!canExpand}
 	>
@@ -85,7 +72,7 @@
 			<img
 				src={iconUrl}
 				alt=""
-				class="size-4 shrink-0 rounded-sm object-contain opacity-80"
+				class="size-3.5 shrink-0 rounded-sm object-contain opacity-80"
 				onerror={(e) => {
 					// Hide broken images — the text label still identifies the tool
 					(e.currentTarget as HTMLImageElement).style.display = 'none';
@@ -95,24 +82,19 @@
 			<ResolvedIcon class="size-3 shrink-0 opacity-60" />
 		{/if}
 
-		<span class="flex-1 font-medium">{displayLabel.replace('Api', 'API')}</span>
+		<span class="flex-1 truncate font-medium">{displayLabel.replace('Api', 'API')}</span>
 
-		{#if isRunning}
-			<!-- Spinning loader while the tool is being invoked -->
-			<LoaderCircleIcon class="size-3 shrink-0 animate-spin text-muted-foreground/60" />
-		{:else}
-			<CheckIcon class="size-3 shrink-0 text-green-500" />
-			{#if hasDetails}
-				<ChevronDownIcon
-					class="size-3 shrink-0 transition-transform duration-150 {expanded ? 'rotate-180' : ''}"
-				/>
-			{/if}
+		{#if hasDetails && !isRunning}
+			<ChevronDownIcon
+				class="size-3 shrink-0 text-muted-foreground/50 transition-transform duration-150 {expanded
+					? 'rotate-180'
+					: ''}"
+			/>
 		{/if}
 	</button>
 
-	<!-- Expandable detail panel -->
 	{#if expanded && hasDetails}
-		<div class="border-t border-border/40">
+		<div class="mt-1 overflow-hidden rounded-md border border-border/30 bg-muted/20">
 			<ToolCallDetails {argsJson} {detailsLabel} {result} {images} />
 		</div>
 	{/if}

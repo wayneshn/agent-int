@@ -136,6 +136,24 @@ export class GmailTriggerProvider extends EmailPollingTriggerProvider {
 		return ids;
 	}
 
+	protected async listLatestIds(
+		ctx: AppTriggerProviderContext,
+		params: Record<string, unknown>,
+	): Promise<string[]> {
+		// Newest messages, no time filter (an `after:0` returns nothing), single page.
+		const qs: Record<string, string> = { q: '-in:chats', maxResults: '10' };
+		const labelId = typeof params.labelId === 'string' ? params.labelId.trim() : '';
+		if (labelId) qs.labelIds = labelId;
+
+		const response = await ctx.execute({ method: 'GET', url: `${GMAIL_API_BASE}/messages`, qs });
+		if (!response.ok) {
+			const excerpt = await readErrorExcerpt(response);
+			throw new Error(`Gmail messages.list failed (${response.status}): ${excerpt}`);
+		}
+		const body = (await response.json()) as GmailMessageList;
+		return (body.messages ?? []).map((m) => m.id);
+	}
+
 	protected async fetchAndNormalize(
 		ctx: AppTriggerProviderContext,
 		id: string,

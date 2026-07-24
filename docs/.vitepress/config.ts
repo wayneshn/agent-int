@@ -71,6 +71,10 @@ export default defineConfig({
 						{ text: 'API Keys', link: '/guide/api-keys' },
 					],
 				},
+				{
+					text: 'Development',
+					items: [{ text: 'Testing', link: '/guide/testing' }],
+				},
 			],
 			'/integrations/': [
 				{

@@ -117,3 +117,7 @@ PORT=3000 ORIGIN=$APP_URL node apps/web/build/index.js   # web UI
 ```
 
 Set `AGENT_RUNTIME_ENTRY` to the absolute path of `apps/agent-runtime/dist/index.js` and `AGENT_WORKSPACES_PATH` to a persistent directory outside the repo.
+
+## Running the tests
+
+The monorepo has a layered test suite — unit tests (`pnpm test`), API integration and security regression tests against a real backend and throwaway database (`pnpm test:integration`), and Playwright end-to-end tests (`pnpm test:e2e`). See the [Testing](/guide/testing) guide for prerequisites, the shared harness, and how to write tests.

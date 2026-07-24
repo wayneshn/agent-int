@@ -119,8 +119,9 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      # Expose to host for local DB access/migrations — remove in production if not needed
-      - '5432:5432'
+      # Expose to host for local DB access/migrations — remove in production if not needed.
+      # Override the host side via POSTGRES_HOST_PORT when 5432 is already taken.
+      - '${POSTGRES_HOST_PORT:-5432}:5432'
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-valmis}']
       interval: 5s

@@ -39,7 +39,9 @@ COPY . .
 
 # Build everything except @repo/docs — the docs (vitepress) package produces no
 # runtime artifact and its devDependencies are not installed in this image.
-RUN pnpm exec turbo run build --filter=!@repo/docs
+# @repo/test-utils is dev/test-only — remove it so it is not in the workspace
+# graph (backend's ^build would otherwise pull it in) and never lands in images.
+RUN rm -rf packages/test-utils && pnpm exec turbo run build --filter=!@repo/docs
 
 # ─── Runtime stage ─────────────────────────────────────────────────────────────
 # Lean production image — compiled outputs + production dependencies only.

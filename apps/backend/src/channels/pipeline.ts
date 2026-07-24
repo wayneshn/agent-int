@@ -132,11 +132,7 @@ export class MessagePipeline {
 			});
 			await this.chatFileService.attachToMessage(fileIds, userMessage.id, threadId, userId);
 
-			// 5. Fire-and-forget background tasks keyed off the user-message count:
-			//    1st message → summarize the previous thread, 2nd message → auto-title.
-			this.scheduleBackgroundTasks(threadId, userId, agentId);
-
-			// 6. Register the stream subscriber for the channel adapter.
+			// 5. Register the stream subscriber for the channel adapter.
 			//    Web adapter returns a no-op — the SSE endpoint handles delivery.
 			//    Batched adapters (telegram, discord) accumulate and dispatch.
 			const subscriber = adapter.createStreamSubscriber(threadId, externalId, {
@@ -156,7 +152,7 @@ export class MessagePipeline {
 				}
 			});
 
-			// 7. Spawn the agent child process (non-blocking). The channel gates UI
+			// 6. Spawn the agent child process (non-blocking). The channel gates UI
 			//    rendering — only web-channel turns register the render_ui tool.
 			await this.runtimeService.spawnForThread(
 				agentId,
@@ -168,6 +164,13 @@ export class MessagePipeline {
 				undefined,
 				channel,
 			);
+
+			// Fire-and-forget background tasks keyed off the user-message count:
+			//    1st message → summarize the previous thread, 2nd message → auto-title.
+			// Scheduled AFTER the spawn (which marks the thread 'running') so the
+			// title task's wait-for-turn-end check can never observe the stale
+			// pre-spawn status and race the fresh runtime's history load.
+			this.scheduleBackgroundTasks(threadId, userId, agentId);
 
 			return { ok: true, status: 201, userMessage, threadId };
 		} catch (err) {
@@ -223,8 +226,26 @@ export class MessagePipeline {
 		agentId: string,
 	): Promise<void> {
 		try {
-			const thread = await this.sessionService.getThreadByIdInternal(threadId);
+			let thread = await this.sessionService.getThreadByIdInternal(threadId);
 			if (!thread) return;
+
+			// Wait for any active turn to finish (bounded). generateThreadTitle
+			// persists an empty assistant row for token accounting — if it landed
+			// while a freshly spawned runtime was loading its history, the history
+			// would end with an assistant message and pi-agent's continue() would
+			// throw "Cannot continue from message role: assistant", killing the turn.
+			// This task is fire-and-forget, so waiting here is safe.
+			const deadline = Date.now() + 2 * 60_000;
+			while (thread.status === 'running' && Date.now() < deadline) {
+				await new Promise((r) => setTimeout(r, 1000));
+				const fresh = await this.sessionService.getThreadByIdInternal(threadId);
+				if (!fresh) return;
+				thread = fresh;
+			}
+			// Give up rather than race the turn — the self-healing retry on the
+			// next user message will title the thread instead.
+			if (thread.status === 'running') return;
+
 			// Skip only if the thread has a REAL title. New chat threads are created
 			// with the placeholder 'New conversation' (DEFAULT_THREAD_TITLE) persisted as
 			// the title, which must still be replaced by the generated one; whereas

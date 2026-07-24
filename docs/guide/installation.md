@@ -156,7 +156,7 @@ Back up the Postgres volume (or use `pg_dump`) and keep your `.env` — especial
 
 ### Production hardening
 
-- The compose file publishes Postgres on host port `5432` for convenience. Remove that `ports:` entry in production if you don't need direct database access.
+- The compose file publishes Postgres on host port `5432` for convenience (override with `POSTGRES_HOST_PORT` if another Postgres already occupies it). Remove that `ports:` entry in production if you don't need direct database access.
 - Put a reverse proxy with TLS in front of port 3000, set `APP_URL`/`ALLOWED_ORIGINS` to the public HTTPS URL, and set `TRUST_PROXY_HOPS=1`.
 - The Docker socket is never mounted into the app container — agent sandboxes are managed through a restricted [socket proxy](/guide/security#the-docker-socket-proxy). Don't attach the socket proxy to the agent runtime networks.
 

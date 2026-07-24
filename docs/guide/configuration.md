@@ -10,6 +10,7 @@ All configuration is done through environment variables, normally in a `.env` fi
 | `POSTGRES_USER`     | `postgres`              | Database user.                                                                                               |
 | `POSTGRES_PASSWORD` | —                       | Database password. Always set your own.                                                                      |
 | `POSTGRES_PORT`     | `5432`                  | Database port.                                                                                               |
+| `POSTGRES_HOST_PORT` | `5432`                 | Host-side port the bundled Postgres is published on (compose only). Change when another Postgres already occupies 5432. |
 | `POSTGRES_HOST`     | `postgres`              | Database host. `postgres` is the compose service name; use your own host when bringing an external database. |
 | `DATABASE_URL`      | composed from the above | Full connection string the backend actually uses.                                                            |
 

@@ -136,8 +136,20 @@ export async function runAgent(
 		'[agent-runner] message history loaded',
 	);
 
+	// Drop assistant rows with no visible content (e.g. the empty row persisted
+	// for title-generation token accounting). They carry no conversational signal,
+	// a TRAILING one crashes pi-agent's continue() ("Cannot continue from message
+	// role: assistant"), and adjacent ones create invalid consecutive-assistant
+	// histories for strict providers.
+	const historyMessages = existingMessages.filter((msg) => {
+		if (msg.role !== 'assistant') return true;
+		return msg.content.some(
+			(b) => b.type !== 'text' || (b.type === 'text' && b.text.trim() !== ''),
+		);
+	});
+
 	// Convert DB messages to pi-ai Message[]
-	const agentMessages: Message[] = existingMessages.map((msg) => {
+	const agentMessages: Message[] = historyMessages.map((msg) => {
 		if (msg.role === 'user') {
 			const userMsg: UserMessage = {
 				role: 'user',

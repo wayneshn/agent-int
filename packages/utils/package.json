@@ -16,7 +16,8 @@
 	"scripts": {
 		"build": "tsc",
 		"typecheck": "tsc --noEmit",
-		"lint": "tsc --noEmit"
+		"lint": "tsc --noEmit",
+		"test": "vitest run"
 	},
 	"keywords": [],
 	"author": "",
@@ -24,7 +25,9 @@
 	"devDependencies": {
 		"@repo/tsconfig": "workspace:*",
 		"@types/js-yaml": "^4.0.9",
-		"@types/node": "^25.9.1"
+		"@types/node": "^25.9.1",
+		"@vitest/coverage-v8": "^4.1.10",
+		"vitest": "^4.1.10"
 	},
 	"dependencies": {
 		"@repo/types": "workspace:*",

@@ -18,10 +18,16 @@ build
 .DS_Store
 Thumbs.db
 
+# Test artifacts
+apps/web/test-results
+apps/web/playwright-report
+coverage
+
 # Editor
 .vscode/settings.json
 .dev
 .claude
+.kilo
 # VitePress
 docs/.vitepress/cache
 docs/.vitepress/dist

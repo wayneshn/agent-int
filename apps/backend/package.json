@@ -7,8 +7,10 @@
 		"dev": "tsx watch src/index.ts",
 		"build": "tsc --project tsconfig.json",
 		"start": "node dist/index.js",
-		"typecheck": "tsc --noEmit",
+		"typecheck": "tsc --noEmit && tsc --noEmit -p tsconfig.test.json",
 		"lint": "tsc --noEmit",
+		"test": "vitest run --project unit",
+		"test:integration": "vitest run --project integration",
 		"db:generate": "drizzle-kit generate",
 		"db:migrate": "drizzle-kit migrate",
 		"db:studio": "drizzle-kit studio",
@@ -57,8 +59,11 @@
 		"@types/pino": "^7.0.5",
 		"@types/uuid": "^11.0.0",
 		"@types/ws": "^8.18.1",
+		"@repo/test-utils": "workspace:*",
+		"@vitest/coverage-v8": "^4.1.10",
 		"drizzle-kit": "^0.31.10",
 		"playwright": "1.61.0",
-		"tsx": "^4.22.3"
+		"tsx": "^4.22.3",
+		"vitest": "^4.1.10"
 	}
 }

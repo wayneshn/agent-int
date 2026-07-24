@@ -46,9 +46,16 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Gate: images only publish when the full test suite is green.
+  test:
+    uses: ./.github/workflows/test.yml
+
   # Detects whether the browser image's source changed, so publish-browser can skip
   # a no-op rebuild on routine main pushes.
   changes:
+    needs: test
+    permissions:
+      contents: read
     runs-on: ubuntu-latest
     outputs:
       browser: ${{ steps.filter.outputs.browser }}
@@ -66,6 +73,7 @@ jobs:
 
   # App + agent-runtime — always built (version-locked to each other + the commit).
   publish:
+    needs: test
     runs-on: ubuntu-latest
     permissions:
       contents: read

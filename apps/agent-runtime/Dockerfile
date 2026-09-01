@@ -104,6 +104,12 @@ RUN mkdir -p /workspace && chown agent:agent /workspace
 
 ENV NODE_ENV=production
 
+# Commit this image was built from, stamped by CI (build-args: GIT_SHA). This
+# image is version-locked to the app image, so stamping both makes a mismatched
+# pin visible. Defaults to "unknown" for local builds.
+ARG GIT_SHA=unknown
+ENV APP_VERSION=$GIT_SHA
+
 USER 10001:10001
 
 ENTRYPOINT ["node", "/repo/apps/agent-runtime/dist/index.js"]

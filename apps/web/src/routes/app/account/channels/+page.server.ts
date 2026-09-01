@@ -4,6 +4,24 @@ import { error, fail } from '@sveltejs/kit';
 import type { Agent, ChannelLink, CredentialMetadata } from '@repo/types';
 
 /**
+ * Run a server `api()` call and fall back to an empty list on any failure.
+ * `api()` throws on non-OK responses; this page aggregates three independent
+ * sources, so one failing endpoint shouldn't blank the whole page.
+ *
+ * The body is read inside this helper, i.e. inside each `Promise.all` branch,
+ * rather than after the whole batch settles — see the note in `$lib/server/api`.
+ */
+async function safeList<T>(request: Promise<Response>): Promise<T[]> {
+	try {
+		const res = await request;
+		const body = await res.json();
+		return (body.data ?? []) as T[];
+	} catch {
+		return [];
+	}
+}
+
+/**
  * Load the channel links list, the user's agents, and all credentials for the "Connect" dialog.
  * The frontend filters credentials by the selected channel's required credentialType.
  */
@@ -11,36 +29,13 @@ export const load: PageServerLoad = async (event) => {
 	const ownerId = event.locals.user?.id;
 	if (!ownerId) throw error(401, 'Unauthorized');
 
-	const [linksRes, agentsRes, credsRes] = await Promise.all([
-		event.fetch('/api/v1/channels/links', {
-			headers: { Authorization: `Bearer ${event.cookies.get('accessToken') ?? ''}` }
-		}),
-		event.fetch('/api/v1/agents', {
-			headers: { Authorization: `Bearer ${event.cookies.get('accessToken') ?? ''}` }
-		}),
-		event.fetch('/api/v1/credentials', {
-			headers: { Authorization: `Bearer ${event.cookies.get('accessToken') ?? ''}` }
-		})
+	// Credentials are passed in full — the frontend filters them by the selected
+	// channel's required credentialType.
+	const [links, agents, credentials] = await Promise.all([
+		safeList<ChannelLink>(api('/channels/links', event)),
+		safeList<Agent>(api('/agents', event)),
+		safeList<CredentialMetadata>(api('/credentials', event))
 	]);
-
-	let links: ChannelLink[] = [];
-	if (linksRes.ok) {
-		const body = await linksRes.json();
-		links = (body.data ?? []) as ChannelLink[];
-	}
-
-	let agents: Agent[] = [];
-	if (agentsRes.ok) {
-		const body = await agentsRes.json();
-		agents = (body.data ?? []) as Agent[];
-	}
-
-	// Pass ALL credentials to the frontend — it filters by channel's required credentialType
-	let credentials: CredentialMetadata[] = [];
-	if (credsRes.ok) {
-		const body = await credsRes.json();
-		credentials = (body.data ?? []) as CredentialMetadata[];
-	}
 
 	return { links, agents, credentials };
 };

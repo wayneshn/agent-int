@@ -123,6 +123,12 @@ RUN chmod +x docker-entrypoint.sh
 
 ENV NODE_ENV=production
 
+# Commit this image was built from, stamped by CI (build-args: GIT_SHA).
+# Exposed at GET /health so a running container can be matched to a commit
+# without inspecting build artefacts. Defaults to "unknown" for local builds.
+ARG GIT_SHA=unknown
+ENV APP_VERSION=$GIT_SHA
+
 # Port 3000: SvelteKit frontend (published externally in docker-compose)
 # Port 4000: Express backend (NOT published externally — only on Docker network)
 EXPOSE 3000

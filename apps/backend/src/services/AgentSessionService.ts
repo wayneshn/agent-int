@@ -68,6 +68,37 @@ function rowToThread(row: typeof agentThreads.$inferSelect): AgentThread {
 	};
 }
 
+/** Row shape returned by the thread-list query — every column except the two
+ *  unbounded ones (`triggerPayload`, `contextSummary`). See `listThreads`. */
+type ThreadSummaryRow = Omit<typeof agentThreads.$inferSelect, 'triggerPayload' | 'contextSummary'>;
+
+/**
+ * Maps a list row to `AgentThread`. `triggerPayload` and `contextSummary` are
+ * left undefined because the list query does not fetch them — both are optional
+ * on `AgentThread`, so a list entry stays a valid thread object.
+ */
+function rowToThreadSummary(row: ThreadSummaryRow): AgentThread {
+	return {
+		id: row.id,
+		agentId: row.agentId,
+		ownerId: row.ownerId,
+		title: row.title ?? undefined,
+		status: row.status as AgentThreadStatus,
+		triggerType: row.triggerType as AgentTriggerType,
+		triggerId: row.triggerId ?? undefined,
+		contextTokens: row.contextTokens ?? undefined,
+		compactedAt: row.compactedAt ?? undefined,
+		isWorkflowThread: row.isWorkflowThread,
+		isPinned: row.isPinned,
+		initiatorAgentId: row.initiatorAgentId ?? undefined,
+		parentThreadId: row.parentThreadId ?? undefined,
+		delegationChain: (row.delegationChain as string[] | null) ?? undefined,
+		missionId: row.missionId ?? undefined,
+		createdAt: row.createdAt,
+		updatedAt: row.updatedAt,
+	};
+}
+
 function rowToMessage(row: typeof agentMessages.$inferSelect): AgentMessage {
 	return {
 		id: row.id,
@@ -161,7 +192,20 @@ export class AgentSessionService {
 		return rows[0] ? rowToThread(rows[0]) : null;
 	}
 
-	/** List all threads for an agent, ordered newest first */
+	/**
+	 * List all threads for an agent, ordered newest first.
+	 *
+	 * Deliberately selects an explicit column list instead of `select()`, to keep
+	 * the two unbounded columns — `trigger_payload` and `context_summary` — out of
+	 * the response. `trigger_payload` holds the whole event that started the
+	 * thread; for an agent driven by an email trigger that is a full message per
+	 * thread (observed: 390KB each across 2,104 threads, an 80MB list response),
+	 * which is enough to break the callers reading it. No consumer of this list
+	 * uses either column: the chat sidebar reads title/status/pinned/workflow
+	 * flags, the thread page additionally reads contextTokens, and the channel
+	 * `/sessions` command reads title + isWorkflowThread. Anything needing the
+	 * payload or the summary loads the single thread via `getThreadById`.
+	 */
 	async listThreads(agentId: string, ownerId: string): Promise<AgentThread[]> {
 		// Verify agent ownership first
 		const agentRows = await db
@@ -172,11 +216,29 @@ export class AgentSessionService {
 		if (!agentRows[0]) return [];
 
 		const rows = await db
-			.select()
+			.select({
+				id: agentThreads.id,
+				agentId: agentThreads.agentId,
+				ownerId: agentThreads.ownerId,
+				title: agentThreads.title,
+				status: agentThreads.status,
+				triggerType: agentThreads.triggerType,
+				triggerId: agentThreads.triggerId,
+				contextTokens: agentThreads.contextTokens,
+				compactedAt: agentThreads.compactedAt,
+				isWorkflowThread: agentThreads.isWorkflowThread,
+				isPinned: agentThreads.isPinned,
+				initiatorAgentId: agentThreads.initiatorAgentId,
+				parentThreadId: agentThreads.parentThreadId,
+				delegationChain: agentThreads.delegationChain,
+				missionId: agentThreads.missionId,
+				createdAt: agentThreads.createdAt,
+				updatedAt: agentThreads.updatedAt,
+			})
 			.from(agentThreads)
 			.where(and(eq(agentThreads.agentId, agentId), eq(agentThreads.ownerId, ownerId)))
 			.orderBy(desc(agentThreads.createdAt));
-		return rows.map(rowToThread);
+		return rows.map(rowToThreadSummary);
 	}
 
 	/**

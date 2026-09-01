@@ -30,12 +30,18 @@ interface ProxyRequestInit extends RequestInit {
 
 /**
  * Proxies /api/* requests to the internal Express backend, stripping the /api
- * prefix (same rewrite as the Vite dev proxy in vite.config.ts). In dev, Vite
- * intercepts /api before SvelteKit sees it — this path only runs in the
- * production adapter-node server, where frontend and backend share a container.
+ * prefix (same rewrite as the Vite dev proxy in vite.config.ts).
+ *
+ * This runs in dev as well as in production. The Vite dev proxy only intercepts
+ * requests that actually travel over HTTP, i.e. those the browser makes; a
+ * same-origin `event.fetch` from a load function or form action never becomes an
+ * HTTP request — SvelteKit dispatches it straight into this hook — so every
+ * server-side `$lib/server/api` call reaches the backend through here in both
+ * environments.
  *
  * The response body is passed through as a stream so SSE (the chat stream
- * endpoint) works unchanged.
+ * endpoint) works unchanged. Server-side callers must therefore not hold an
+ * unread response across an await boundary; `$lib/server/api` buffers for them.
  */
 const proxyApiRequest = async (event: RequestEvent): Promise<Response> => {
 	const backendUrl = env.BACKEND_URL ?? `http://localhost:${env.BACKEND_PORT ?? '4000'}`;
